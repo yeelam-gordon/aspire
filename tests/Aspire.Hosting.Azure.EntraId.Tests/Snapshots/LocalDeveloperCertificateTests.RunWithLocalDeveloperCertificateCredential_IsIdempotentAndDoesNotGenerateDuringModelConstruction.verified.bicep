@@ -2,10 +2,19 @@
 
 param tenantResourceSuffix string = ''
 
-param localDeveloperKeyCredentials string
-
 resource application 'Microsoft.Graph/applications@v1.0' = {
-  keyCredentials: json(localDeveloperKeyCredentials)
+  keyCredentials: [
+    {
+      customKeyIdentifier: '<certificate thumbprint>'
+      displayName: 'Aspire local developer certificate'
+      endDateTime: '2026-06-03T00:00:00.0000000+00:00'
+      key: '<public DER certificate>'
+      keyId: '00000000-0000-0000-0000-000000000001'
+      startDateTime: '2026-06-01T00:00:00.0000000+00:00'
+      type: 'AsymmetricX509Cert'
+      usage: 'Verify'
+    }
+  ]
   displayName: (tenantResourceSuffix == '') ? 'entra-web' : 'entra-web-${tenantResourceSuffix}'
   uniqueName: (tenantResourceSuffix == '') ? 'entra-web' : 'entra-web-${tenantResourceSuffix}'
   signInAudience: 'AzureADMyOrg'

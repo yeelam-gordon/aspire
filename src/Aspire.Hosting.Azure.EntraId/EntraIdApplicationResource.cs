@@ -4,6 +4,7 @@
 #pragma warning disable ASPIREPIPELINES001 // Existing registrations remove the framework's provisioning annotations.
 #pragma warning disable ASPIREAZURE003 // Tenant-scoped resource annotations are experimental.
 
+using System.Globalization;
 using System.IO.Hashing;
 using System.Text;
 using Aspire.Hosting.ApplicationModel;
@@ -496,9 +497,20 @@ public class EntraIdApplicationResource : AzureProvisioningResource
 
         if (resource.ClientCredentials.OfType<EntraIdLocalDeveloperCertificateCredential>().SingleOrDefault() is { } localCredential)
         {
-            var publicKeys = new EntraIdLocalKeyCredentials(resource, localCredential)
-                .AsProvisioningParameter(infrastructure, "localDeveloperKeyCredentials");
-            application.KeyCredentials = BicepFunction.ParseJson(publicKeys).Compile();
+            // This developer registration owns the full key collection. Embed only the selected public
+            // certificate so renewal changes the template checksum without a separate Graph read.
+            var certificate = localCredential.GetCertificate(resource);
+            application.KeyCredentials = [new MicrosoftGraphKeyCredential
+            {
+                CustomKeyIdentifier = certificate.Thumbprint,
+                DisplayName = "Aspire local developer certificate",
+                EndDateTime = certificate.NotAfter.ToString("O", CultureInfo.InvariantCulture),
+                Key = certificate.PublicCertificate,
+                KeyId = certificate.KeyId.ToString(),
+                StartDateTime = certificate.NotBefore.ToString("O", CultureInfo.InvariantCulture),
+                Type = "AsymmetricX509Cert",
+                Usage = "Verify"
+            }];
         }
 
         resource.ValidateScopeReferences();

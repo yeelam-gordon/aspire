@@ -12,23 +12,28 @@ namespace Aspire.Hosting.Azure;
 /// </summary>
 internal sealed class EntraIdLocalDeveloperCertificateCredential : EntraIdClientCredential
 {
+    private readonly DistributedApplicationExecutionContext _executionContext;
     private readonly SemaphoreSlim _certificateLock = new(1, 1);
     private LocalDeveloperCertificate? _certificate;
 
     public EntraIdLocalDeveloperCertificateCredential(EntraIdApplicationResource application, DistributedApplicationExecutionContext executionContext)
     {
+        _executionContext = executionContext;
         // A ParameterResource makes the PFX participate in the existing secret discovery/redaction
         // pipeline. It has no published default and never enters the Azure provisioning parameters.
         Secret = new ParameterResource(
             $"{application.Name}-local-certificate",
-            _ => GetCertificateAsync(executionContext.Services, application,
-                executionContext.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping).GetAwaiter().GetResult().Base64EncodedValue,
+            _ => GetCertificate(application).Base64EncodedValue,
             secret: true);
     }
 
     public override string SourceType => "Base64Encoded";
 
     internal ParameterResource Secret { get; }
+
+    internal LocalDeveloperCertificate GetCertificate(EntraIdApplicationResource application) =>
+        GetCertificateAsync(_executionContext.Services, application,
+            _executionContext.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping).GetAwaiter().GetResult();
 
     internal async Task<LocalDeveloperCertificate> GetCertificateAsync(IServiceProvider services, EntraIdApplicationResource application, CancellationToken cancellationToken)
     {

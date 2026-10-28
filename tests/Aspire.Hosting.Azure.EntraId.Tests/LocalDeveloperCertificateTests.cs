@@ -5,7 +5,6 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
-using System.Text.Json.Nodes;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Azure.EntraId.Tests.TestServices;
 using Aspire.Hosting.Testing;
@@ -233,10 +232,15 @@ public class LocalDeveloperCertificateTests
 
         Assert.Same(entra, entra.RunWithLocalDeveloperCertificateCredential());
         Assert.Same(entra, entra.RunWithLocalDeveloperCertificateCredential());
-        Assert.IsType<EntraIdLocalDeveloperCertificateCredential>(Assert.Single(entra.Resource.ClientCredentials));
-        await Verify(entra.Resource.GetBicepTemplateString(), "bicep");
-        using var app = builder.Build();
+        var credential = Assert.IsType<EntraIdLocalDeveloperCertificateCredential>(Assert.Single(entra.Resource.ClientCredentials));
+        using var app = BuildApplication(builder, new CertificateTestTimeProvider());
         Assert.False(Directory.Exists(Path.Combine(app.Services.GetRequiredService<IAspireStore>().BasePath, "dev-certs")));
+        var template = entra.Resource.GetBicepTemplateString();
+        var certificate = await credential.GetCertificateAsync(app.Services, entra.Resource, TestContext.Current.CancellationToken);
+        await Verify(template, "bicep").AddScrubber(text => text
+            .Replace(certificate.PublicCertificate, "<public DER certificate>")
+            .Replace(certificate.KeyId.ToString(), "00000000-0000-0000-0000-000000000001")
+            .Replace(certificate.Thumbprint, "<certificate thumbprint>"));
     }
 
     [Fact]
@@ -268,7 +272,6 @@ public class LocalDeveloperCertificateTests
         var template = entra.Resource.GetBicepTemplateString();
         Assert.Empty(entra.Resource.ClientCredentials);
         Assert.All(builder.Services, s => Assert.NotEqual(typeof(LocalDeveloperCertificateStore), s.ServiceType));
-        Assert.False(entra.Resource.Parameters.ContainsKey("localDeveloperKeyCredentials"));
         await Verify(template, "bicep");
         var environment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(web.Resource, DistributedApplicationOperation.Publish, TestServiceProvider.Instance);
         await Verify(environment).UseMethodName($"{nameof(Publish_DoesNotRegisterCertificateServicesOrPublishCertificateConfiguration)}_Environment");
@@ -354,64 +357,10 @@ public class LocalDeveloperCertificateTests
         Assert.False(entra.Resource.ProvisioningTaskCompletionSource.Task.IsCompleted);
     }
 
-    [Fact]
-    public async Task PublicKeys_PreserveUnrelatedAndUnexpiredKeysAndPruneOnlyOwnedExpiredKeys()
-    {
-        using var builder = TestDistributedApplicationBuilder.Create();
-        var clock = new CertificateTestTimeProvider();
-        using var app = BuildApplication(builder, clock);
-        var certificate = await app.Services.GetRequiredService<LocalDeveloperCertificateStore>().GetCertificateAsync("entra-web", TestContext.Current.CancellationToken);
-        const string owner = "aspire-local-test";
-        var existing = new JsonArray(
-            Key("00000000-0000-0000-0000-000000000001", owner, clock.UtcNow.AddHours(1)),
-            Key("00000000-0000-0000-0000-000000000002", owner, clock.UtcNow),
-            Key("00000000-0000-0000-0000-000000000003", "unrelated", clock.UtcNow.AddDays(-1)),
-            Key("00000000-0000-0000-0000-000000000004", "other-developer", clock.UtcNow.AddDays(1)));
-
-        var merged = EntraIdLocalKeyCredentials.MergePublicKeys(existing, certificate, owner, clock.UtcNow);
-        Assert.Equal(4, merged.Count);
-        var selected = Assert.Single(merged.OfType<JsonObject>(), k => k["keyId"]!.GetValue<string>() == certificate.KeyId.ToString());
-        using var publicCertificate = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(selected["key"]!.GetValue<string>()));
-        Assert.False(publicCertificate.HasPrivateKey);
-        Assert.Equal(certificate.PublicCertificate, selected["key"]!.GetValue<string>());
-        Assert.Equal(merged.ToJsonString(), EntraIdLocalKeyCredentials.MergePublicKeys(merged, certificate, owner, clock.UtcNow).ToJsonString());
-
-        // Keep the entire public payload shape in the snapshot without recording nondeterministic key bytes.
-        selected["keyId"] = "selected-certificate-id";
-        selected["key"] = "<public DER certificate>";
-        selected["customKeyIdentifier"] = "<certificate thumbprint>";
-        await Verify(merged.ToJsonString(), "json");
-    }
-
-    [Theory]
-    [InlineData("https://login.microsoftonline.com/", "https://graph.microsoft.com")]
-    [InlineData("https://LOGIN.MICROSOFTONLINE.US/", "https://graph.microsoft.us")]
-    [InlineData("https://login.partner.microsoftonline.cn/", "https://microsoftgraph.chinacloudapi.cn")]
-    public void PublicKeys_UseTheRegistrationCloud(string instance, string graphEndpoint)
-    {
-        Assert.Equal(graphEndpoint, EntraIdLocalKeyCredentials.GetGraphEndpoint(instance));
-    }
-
-    [Fact]
-    public void PublicKeys_RejectUnknownCloudWithoutRequestingAToken()
-    {
-        Assert.Throws<InvalidOperationException>(() => EntraIdLocalKeyCredentials.GetGraphEndpoint("https://login.example.com/"));
-    }
-
     private static DistributedApplication BuildApplication(IDistributedApplicationTestingBuilder builder, CertificateTestTimeProvider clock)
     {
         builder.Services.AddSingleton<TimeProvider>(clock);
         builder.Services.AddSingleton<LocalDeveloperCertificateStore>();
         return builder.Build();
     }
-
-    private static JsonObject Key(string id, string owner, DateTimeOffset end) => new()
-    {
-        ["keyId"] = id,
-        ["displayName"] = owner,
-        ["endDateTime"] = end.ToString("O"),
-        ["key"] = "existing-public-key",
-        ["type"] = "AsymmetricX509Cert",
-        ["usage"] = "Verify"
-    };
 }

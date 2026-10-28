@@ -563,6 +563,8 @@ public static class EntraIdResourceExtensions
     /// on a subsequent run, a certificate with one day or less remaining is replaced by overwriting its PFX file.
     /// Only the public certificate is provisioned in Entra. Referencing applications receive the private
     /// credential as a secret <c>Base64EncodedValue</c> in Microsoft.Identity.Web's <c>ClientCredentials</c> configuration.
+    /// Aspire replaces the registration's entire <c>keyCredentials</c> collection with the selected certificate.
+    /// Existing certificate credentials are not retained, so older sessions must restart after renewal.
     /// </para>
     /// <para>
     /// Development and production must use separate Entra registrations. Never register developer certificates
@@ -602,7 +604,6 @@ public static class EntraIdResourceExtensions
 
         builder.ApplicationBuilder.Services.TryAddSingleton(TimeProvider.System);
         builder.ApplicationBuilder.Services.TryAddSingleton<LocalDeveloperCertificateStore>();
-        builder.ApplicationBuilder.Services.AddHttpClient(EntraIdLocalKeyCredentials.HttpClientName);
         builder.Resource.ClientCredentials.Add(new EntraIdLocalDeveloperCertificateCredential(builder.Resource, builder.ApplicationBuilder.ExecutionContext));
         return builder;
     }
