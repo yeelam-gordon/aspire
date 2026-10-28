@@ -2,14 +2,12 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Aspire.Hosting.Azure;
-using Microsoft.Extensions.Configuration;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
 // Set to true to reference an existing registration. README.md describes the setup and cleanup for both modes.
 var useExistingApplication = false;
-var useLocalCertificate = builder.ExecutionContext.IsRunMode &&
-    builder.Configuration.GetValue<bool>("UseLocalDeveloperCertificateCredential");
+var useLocalCertificate = false;
 if (useExistingApplication && useLocalCertificate)
 {
     throw new InvalidOperationException("The local certificate demo requires an Aspire-created development registration.");
@@ -40,7 +38,7 @@ var webFrontend = builder.AddProject<Projects.EntraId_Web>("webfrontend")
     .WithExternalHttpEndpoints()
     .WithReference(entraWeb);
 
-if (useLocalCertificate)
+if (useLocalCertificate && builder.ExecutionContext.IsRunMode)
 {
     entraWeb.RunWithLocalDeveloperCertificateCredential()
         .WithApiPermissions(EntraIdApi.MicrosoftGraph, EntraIdApiPermission.Delegated("User.Read"));
