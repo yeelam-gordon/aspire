@@ -799,6 +799,7 @@ internal sealed class NewCommand : BaseCommand
             InteractionService,
             templateResult.ExitCode,
             workspaceRoot,
+            workspaceRoot,
             agentInitBinding,
             PromptBinding.Create(parseResult, _agentInitCommand.AgentsOption),
             PromptBinding.Create(parseResult, AgentInitCommand.s_skillsOption, CommonAgentApplicators.AspireSkillName),

@@ -2498,7 +2498,8 @@ public class NewCommandTests(ITestOutputHelper outputHelper)
         Assert.Contains("my-project", capturedOutputPath);
 
         Assert.True(AspireSkillsRemoteConfiguration.HasPluginRegistration(
-            [Path.Combine(capturedOutputPath, ".github", "copilot", "settings.json")], TestContext.Current.CancellationToken));
+            [Path.Combine(capturedOutputPath, ".github", "copilot", "settings.json")],
+            [new SkillSource { Plugin = "aspire", Marketplace = "aspire-skills" }]));
         Assert.False(Directory.Exists(Path.Combine(capturedOutputPath, ".agents", "skills")));
     }
 
@@ -3299,7 +3300,8 @@ public class NewCommandTests(ITestOutputHelper outputHelper)
             interactionService.BooleanPromptCalls.Select(call => call.PromptText));
         var outputDirectory = Path.Combine(workspace.WorkspaceRoot.FullName, "output");
         Assert.True(AspireSkillsRemoteConfiguration.HasPluginRegistration(
-            [Path.Combine(outputDirectory, ".github", "copilot", "settings.json")], TestContext.Current.CancellationToken));
+            [Path.Combine(outputDirectory, ".github", "copilot", "settings.json")],
+            [new SkillSource { Plugin = "aspire", Marketplace = "aspire-skills" }]));
         Assert.False(Directory.Exists(Path.Combine(outputDirectory, ".agents", "skills")));
     }
 
@@ -3353,7 +3355,8 @@ public class NewCommandTests(ITestOutputHelper outputHelper)
 
         var outputDirectory = Path.Combine(workspace.WorkspaceRoot.FullName, "output");
         Assert.True(AspireSkillsRemoteConfiguration.HasPluginRegistration(
-            [Path.Combine(outputDirectory, ".github", "copilot", "settings.json")], TestContext.Current.CancellationToken));
+            [Path.Combine(outputDirectory, ".github", "copilot", "settings.json")],
+            [new SkillSource { Plugin = "aspire", Marketplace = "aspire-skills" }]));
         Assert.False(Directory.Exists(Path.Combine(outputDirectory, ".agents", "skills")));
     }
 
@@ -3381,7 +3384,8 @@ public class NewCommandTests(ITestOutputHelper outputHelper)
 
         var outputDirectory = Path.Combine(workspace.WorkspaceRoot.FullName, "output");
         Assert.True(AspireSkillsRemoteConfiguration.HasPluginRegistration(
-            [Path.Combine(outputDirectory, ".github", "copilot", "settings.json")], TestContext.Current.CancellationToken));
+            [Path.Combine(outputDirectory, ".github", "copilot", "settings.json")],
+            [new SkillSource { Plugin = "aspire", Marketplace = "aspire-skills" }]));
         Assert.False(Directory.Exists(Path.Combine(outputDirectory, ".agents", "skills")));
     }
 
