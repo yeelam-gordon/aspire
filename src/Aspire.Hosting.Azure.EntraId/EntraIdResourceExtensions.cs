@@ -41,7 +41,7 @@ public static class EntraIdResourceExtensions
     ///
     /// var entraApi = builder.AddEntraIdApplication("entra-api");
     ///
-    /// builder.AddProject&lt;Projects.Api&gt;("api")
+    /// builder.AddDotnetProject("api", @"..\Api\Api.csproj")
     ///     .WithReference(entraApi);
     /// </code>
     /// </example>
@@ -353,7 +353,7 @@ public static class EntraIdResourceExtensions
     /// var tenantId = builder.AddParameter("EntraTenantId");
     /// var clientId = builder.AddParameter("EntraClientId");
     /// var identity = builder.AddExistingEntraApplication("identity", tenantId, clientId);
-    /// builder.AddProject&lt;Projects.Api&gt;("api").WithReference(identity);
+    /// builder.AddDotnetProject("api", @"..\Api\Api.csproj").WithReference(identity);
     /// </code>
     /// </example>
     /// </remarks>
@@ -414,7 +414,7 @@ public static class EntraIdResourceExtensions
     ///     "identity",
     ///     tenantId: "aaaabbbb-0000-cccc-1111-dddd2222eeee",
     ///     clientId: "00001111-aaaa-2222-bbbb-3333cccc4444");
-    /// builder.AddProject&lt;Projects.Api&gt;("api").WithReference(identity);
+    /// builder.AddDotnetProject("api", @"..\Api\Api.csproj").WithReference(identity);
     /// </code>
     /// </example>
     /// </remarks>
@@ -679,7 +679,7 @@ public static class EntraIdResourceExtensions
     /// var entra = builder.AddEntraIdApplication("entra-web")
     ///     .PublishWithFederatedManagedIdentityCredential();
     ///
-    /// builder.AddProject&lt;Projects.Web&gt;("web")
+    /// builder.AddDotnetProject("web", @"..\Web\Web.csproj")
     ///     .WithReference(entra);
     /// </code>
     /// </example>
@@ -729,7 +729,7 @@ public static class EntraIdResourceExtensions
     /// <example>
     /// <code lang="csharp">
     /// var entra = builder.AddEntraIdApplication("entra-web");
-    /// var web = builder.AddProject&lt;Projects.Web&gt;("web")
+    /// var web = builder.AddDotnetProject("web", @"..\Web\Web.csproj")
     ///     .WithReference(entra);
     ///
     /// entra.PublishWithFederatedManagedIdentityCredential(web);
@@ -782,7 +782,7 @@ public static class EntraIdResourceExtensions
     /// var entra = builder.AddEntraIdApplication("entra-web")
     ///     .PublishWithFederatedManagedIdentityCredential(identity);
     ///
-    /// builder.AddProject&lt;Projects.Web&gt;("web")
+    /// builder.AddDotnetProject("web", @"..\Web\Web.csproj")
     ///     .WithAzureUserAssignedIdentity(identity)
     ///     .WithReference(entra);
     /// </code>
@@ -1113,7 +1113,7 @@ public static class EntraIdResourceExtensions
     /// </remarks>
     /// <example>
     /// <code lang="csharp">
-    /// var web = builder.AddProject&lt;Projects.Web&gt;("web").WithExternalHttpEndpoints();
+    /// var web = builder.AddDotnetProject("web", @"..\Web\Web.csproj").WithExternalHttpEndpoints();
     /// var entraWeb = builder.AddEntraIdApplication("entra-web")
     ///     .WithRedirectUris(web.GetEndpoint("https"), "/signin-oidc", "/signout-callback-oidc");
     /// </code>
@@ -2092,7 +2092,7 @@ public static class EntraIdResourceExtensions
     ///         tenantId: tenantId,
     ///         clientId: clientId);
     ///
-    /// builder.AddProject&lt;Projects.Api&gt;("api")
+    /// builder.AddDotnetProject("api", @"..\Api\Api.csproj")
     ///     .WithReference(entraApi);
     /// </code>
     /// </example>
