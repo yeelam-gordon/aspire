@@ -9,6 +9,7 @@ Like HashR, both use ID-token-only OpenID Connect implicit sign-in: Entra return
 and the app validates its signature, issuer, audience, lifetime, and nonce before creating a local login session.
 Neither app exchanges an authorization code or requires a client secret.
 Neither app calls the other or a downstream API.
+An opt-in local certificate scenario below enables authorization-code redemption and a Microsoft Graph call in the .NET app; the default and Node sign-in flows stay unchanged.
 The two front ends have separate local sessions, although Entra ID can reuse your browser's single-sign-on session.
 
 ## Choose a mode in the AppHost
@@ -65,6 +66,22 @@ dotnet user-secrets set "Parameters:entra-web-client-id" "<web-client-id>"
 
 Set `useExistingApplication = false`. You do not need to create a registration manually or supply `entra-tenant-id` and
 `entra-web-client-id`; these parameters are only declared in existing mode. Previously saved values are ignored, not deleted.
+
+### Opt in to the local certificate scenario
+
+**Use a development-only registration, never production.** Choose a developer-specific **Tenant-scoped resource suffix** in the Azure configuration dialog, different from production. Different resource groups do not isolate registrations in the same tenant.
+
+Keep `useExistingApplication = false`. From `EntraId.AppHost`, enable the scenario in user secrets:
+
+```bash
+dotnet user-secrets set "UseLocalDeveloperCertificateCredential" "true"
+```
+
+On the next run, Aspire provisions a dedicated 48-hour developer certificate and the delegated Graph `User.Read` permission. The .NET app uses authorization code flow with PKCE and Microsoft.Identity.Web's secret base64 certificate configuration. Sign out of an existing .NET session, sign in again, consent to the requested Graph permission if allowed by tenant policy, then select **Call Microsoft Graph /me**. The app acquires a delegated access token and calls Graph as the signed-in user. Tenant policy may require an administrator to approve consent. The Node front end continues to use ID-token-only sign-in.
+
+Restart with the same AppHost store to reuse the certificate and registration. At startup with 24 hours or less remaining, Aspire atomically overwrites `dev-certs/Entra/entra-web.pfx` in the AppHost's Aspire store and reprovisions the public key. It keeps unexpired public predecessor keys so other already-running sessions can finish, but retains no previous private PFX. Restart sessions before expiry; renewal is not a background timer. No private material or local path is included in publish output.
+
+Disable the scenario with `dotnet user-secrets remove "UseLocalDeveloperCertificateCredential"` and restart. This stops injecting a local credential but does not revoke a public key already trusted by the development registration. See the [integration's local certificate contract](../../src/Aspire.Hosting.Azure.EntraId/README.md#local-developer-certificate) for permissions, storage, cleanup, and security considerations.
 
 ### Configure Azure provisioning
 

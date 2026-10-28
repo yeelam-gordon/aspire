@@ -108,10 +108,18 @@ internal sealed class MicrosoftGraphApplication(string bicepIdentifier)
     }
     private BicepList<MicrosoftGraphAppRole>? _appRoles;
 
+    public BicepValue<object> KeyCredentials
+    {
+        get { Initialize(); return _keyCredentials!; }
+        set { Initialize(); _keyCredentials!.Assign(value); }
+    }
+    private BicepValue<object>? _keyCredentials;
+
     protected override void DefineProvisionableProperties()
     {
         base.DefineProvisionableProperties();
         _appRoles = DefineListProperty<MicrosoftGraphAppRole>(nameof(AppRoles), ["appRoles"]);
+        _keyCredentials = DefineProperty<object>(nameof(KeyCredentials), ["keyCredentials"]);
         _id = DefineProperty<string>(nameof(Id), ["id"], isOutput: true);
         _appId = DefineProperty<string>(nameof(AppId), ["appId"], isOutput: true);
         _displayName = DefineProperty<string>(nameof(DisplayName), ["displayName"], isRequired: true);

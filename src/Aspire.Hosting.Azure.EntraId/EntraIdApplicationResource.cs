@@ -109,6 +109,11 @@ public class EntraIdApplicationResource : AzureProvisioningResource
 
     internal void SetExistingApplication()
     {
+        if (ClientCredentials.OfType<EntraIdLocalDeveloperCertificateCredential>().Any())
+        {
+            throw new InvalidOperationException("A registration using RunWithLocalDeveloperCertificateCredential cannot be converted to an existing application. Existing registrations remain caller-managed.");
+        }
+
         IsExistingApplication = true;
         ProvisioningTaskCompletionSource = null;
 
@@ -487,6 +492,13 @@ public class EntraIdApplicationResource : AzureProvisioningResource
         if (resource.AppRoles.Count > 0)
         {
             application.AppRoles = [.. resource.AppRoles.Select(role => CreateAppRole(resource, role))];
+        }
+
+        if (resource.ClientCredentials.OfType<EntraIdLocalDeveloperCertificateCredential>().SingleOrDefault() is { } localCredential)
+        {
+            var publicKeys = new EntraIdLocalKeyCredentials(resource, localCredential)
+                .AsProvisioningParameter(infrastructure, "localDeveloperKeyCredentials");
+            application.KeyCredentials = BicepFunction.ParseJson(publicKeys).Compile();
         }
 
         resource.ValidateScopeReferences();

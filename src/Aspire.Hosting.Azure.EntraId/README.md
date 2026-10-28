@@ -345,6 +345,33 @@ For the audiences other than `AzureADMyOrg`, the home tenant ID is injected as `
 
 An application that acquires tokens for itself needs a client credential. Each `With*` call appends an entry to the injected `AzureAd__ClientCredentials__{index}__*` variables, and multiple credentials can be configured as a fallback chain.
 
+### Local developer certificate
+
+For registrations created by Aspire, opt in to a local certificate instead of copying a client secret:
+
+```csharp
+var entraWeb = builder.AddEntraIdApplication("entra-web")
+                      .RunWithLocalDeveloperCertificateCredential()
+                      .PublishWithFederatedManagedIdentityCredential();
+
+builder.AddProject<Projects.Web>("web")
+       .WithReference(entraWeb);
+```
+
+**Use separate Entra registrations for development and production.** Give each developer a distinct `Azure:TenantResourceSuffix`, and use a different suffix or registration name for production. Registrations are tenant-scoped: different resource groups do not isolate them. The local method does nothing when publishing, but that does **not** revoke a public key previously trusted by the registration. Never use a production registration for this feature.
+
+Aspire creates a dedicated, self-signed RSA certificate valid for **48 hours**. On a subsequent AppHost run, it reuses the certificate when more than **24 hours** remain, otherwise it generates a replacement and updates the registration's public key credentials. Renewal invalidates the Azure provisioning cache. There is no background renewal or running-workload credential reload: restart development sessions before their certificate expires.
+
+The passwordless PFX, including its private key, is stored under the **AppHost-specific Aspire store** at `dev-certs/Entra/<resource-name>.pfx`, not in the user's global HTTPS certificate directory. The store honors `Aspire:Store:Path` / `ASPIRE__STORE__PATH`. The directory and PFX are restricted to the current user. Renewal atomically **overwrites the same PFX file**; it does not retain private-key generations. It neither installs a certificate in an OS store nor trusts it as an HTTPS certificate. Missing or incompatible local material is regenerated; filesystem and Graph failures surface as errors. A failed Graph update leaves the new PFX available for retry.
+
+Only the **public DER certificate** goes to Entra through the Microsoft Graph Bicep extension. Aspire reads the registration's existing `keyCredentials` before deployment, preserves unrelated keys and unexpired predecessors used by already-running workloads, and removes only expired keys bearing this AppHost's ownership marker. This read/replace operation is not a transaction with changes by another writer: do not concurrently manage the same registration from multiple AppHosts or tools. Use developer-specific registration suffixes.
+
+`WithReference` supplies `SourceType = Base64Encoded` and `Base64EncodedValue` containing the private PFX through a **secret parameter**, using the normal configuration naming conventions for .NET and other resources. Projects using Microsoft.Identity.Web receive `AzureAd__ClientCredentials__{index}__SourceType` and `AzureAd__ClientCredentials__{index}__Base64EncodedValue`. Container and other non-.NET resources retain their existing upper-snake-case naming convention. No certificate path, store access, bind mount, or image-build secret is needed. **Base64 is not encryption**: these are sensitive runtime environment values, accessible to the workload and to sufficiently privileged local/container tooling. Do not log them. Local credentials and paths are excluded from published manifests and deployment artifacts.
+
+The provisioning identity needs permission to read and update the application, in addition to the existing registration-creation permissions. For delegated Graph access, `Application.ReadWrite.All` permits this; an application identity can use `Application.ReadWrite.OwnedBy` for registrations it owns, subject to tenant policy and consent. The workloads do not need these Graph management permissions. See [Update application](https://learn.microsoft.com/graph/api/application-update) and [Certificate credentials](https://learn.microsoft.com/entra/identity-platform/certificate-credentials).
+
+AppHost shutdown and Azure resource-group deletion do not delete the local PFX or the tenant-scoped registration. Delete the registration/service principal separately when finished; remove the resource's PFX from the AppHost store if you also want to discard its local credential. Expired public keys may remain until a subsequent run reconciles them. Existing registrations remain caller-managed: this API rejects `AddExistingEntraApplication` and conversion with `AsExistingApplication`.
+
 ### Client secret
 
 ```csharp
@@ -390,7 +417,7 @@ builder.AddProject<Projects.Web>("web")
 ```
 The federated credential only changes how the app authenticates as itself. Interactive user sign-in still needs a redirect URI registered on the app registration. Derive it from the web app's endpoint with `WithRedirectUris(web.GetEndpoint("https"), "/signin-oidc")`, which uses the compute environment's host when deployed, so it does not make the registration depend on the web app.
 
-Managed identities exist only in Azure, so `PublishWithFederatedManagedIdentityCredential` is not used when running locally; add another credential, such as a client secret, for local development.
+Managed identities exist only in Azure, so `PublishWithFederatedManagedIdentityCredential` is not used when running locally. For Aspire-created registrations, combine it with `RunWithLocalDeveloperCertificateCredential` as shown above; the local workload does not probe an unavailable managed identity.
 
 #### Existing registrations
 

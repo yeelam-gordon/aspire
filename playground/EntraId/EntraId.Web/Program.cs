@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Net;
+using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Antiforgery;
@@ -11,13 +12,26 @@ using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.Identity.Web;
 
 var builder = WebApplication.CreateBuilder(args);
+var localCertificateDemo = builder.Configuration.GetValue<bool>("LocalCertificateDemo");
+const string GraphScope = "https://graph.microsoft.com/User.Read";
 
 // Add service defaults & Aspire client integrations.
 builder.AddServiceDefaults();
 
 // The AppHost's WithReference(entraWeb) fills in the AzureAd section with the tenant and client IDs.
-builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
+var authentication = builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
     .AddMicrosoftIdentityWebApp(builder.Configuration);
+
+if (localCertificateDemo)
+{
+    authentication.EnableTokenAcquisitionToCallDownstreamApi([GraphScope]).AddInMemoryTokenCaches();
+    builder.Services.Configure<OpenIdConnectOptions>(OpenIdConnectDefaults.AuthenticationScheme, options =>
+    {
+        options.ResponseType = "code";
+        options.UsePkce = true;
+    });
+    builder.Services.AddHttpClient("MicrosoftGraph", client => client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/"));
+}
 
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery();
@@ -49,9 +63,11 @@ app.MapGet("/", (HttpContext context, IAntiforgery antiforgery) =>
     var rolesText = roles.Length > 0
         ? string.Join(", ", roles.Select(WebUtility.HtmlEncode))
         : "none. Assign a role to this user in the Entra admin center, then sign in again.";
+    var downstreamLink = localCertificateDemo ? """<p><a href="/me">Call Microsoft Graph /me</a></p>""" : string.Empty;
     return Page("Entra ID playground", $"""
         <p>Signed in as <strong>{WebUtility.HtmlEncode(identity.Name)}</strong>.</p>
         <p>Roles: {rolesText}</p>
+        {downstreamLink}
         <form method="post" action="/signout">
             <input type="hidden" name="{antiforgeryTokens.FormFieldName}" value="{antiforgeryTokens.RequestToken}">
             <button type="submit">Sign out</button>
@@ -60,6 +76,20 @@ app.MapGet("/", (HttpContext context, IAntiforgery antiforgery) =>
 });
 
 app.MapGet("/signin", () => Results.Challenge(new AuthenticationProperties { RedirectUri = "/" }));
+
+if (localCertificateDemo)
+{
+    app.MapGet("/me", async (HttpContext context, ITokenAcquisition tokens, IHttpClientFactory clients, CancellationToken cancellationToken) =>
+    {
+        var token = await tokens.GetAccessTokenForUserAsync([GraphScope], user: context.User);
+        using var request = new HttpRequestMessage(HttpMethod.Get, "me");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var client = clients.CreateClient("MicrosoftGraph");
+        using var response = await client.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return Results.Content(await response.Content.ReadAsStringAsync(cancellationToken), "application/json");
+    }).RequireAuthorization();
+}
 
 app.MapPost("/signout", async (HttpContext context, IAntiforgery antiforgery) =>
 {
