@@ -325,8 +325,8 @@ public class LocalDeveloperCertificateTests
         var dependencies = await web.Resource.GetResourceDependenciesAsync(builder.ExecutionContext, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Contains(secret, dependencies);
         var valueKey = container ? "ENTRA_WEB_CLIENT_CREDENTIALS_0_BASE64_ENCODED_VALUE" : "AzureAd__ClientCredentials__0__Base64EncodedValue";
-        var expression = Assert.IsType<ReferenceExpression>(result.EnvironmentVariablesWithUnprocessed.Single(e => e.Key == valueKey).Value.Unprocessed);
-        executable.WithArgs(expression);
+        Assert.Same(secret, result.EnvironmentVariablesWithUnprocessed.Single(e => e.Key == valueKey).Value.Unprocessed);
+        executable.WithArgs(secret);
         var args = await ExecutionConfigurationBuilder.Create(executable.Resource).WithArgumentsConfig()
             .BuildAsync(builder.ExecutionContext, NullLogger.Instance, TestContext.Current.CancellationToken);
         Assert.Null(args.Exception);
@@ -334,7 +334,7 @@ public class LocalDeveloperCertificateTests
     }
 
     [Fact]
-    public async Task Credential_KeepsOneSelectionForTheRunAndDoesNotReleaseItBeforeProvisioning()
+    public async Task Credential_KeepsOneSelectionForTheRunAndResolvesWithoutProvisioning()
     {
         using var builder = TestDistributedApplicationBuilder.Create();
         var clock = new CertificateTestTimeProvider();
@@ -348,12 +348,10 @@ public class LocalDeveloperCertificateTests
 
         var env = new Dictionary<string, object>();
         credential.EmitEnvironmentVariables(env, "AzureAd__ClientCredentials__0", "__", entra.Resource, new ProjectResource("web"), builder.ExecutionContext);
-        var value = Assert.IsAssignableFrom<IValueProvider>(env["AzureAd__ClientCredentials__0__Base64EncodedValue"]);
-        var pending = value.GetValueAsync(TestContext.Current.CancellationToken).AsTask();
-        Assert.False(pending.IsCompleted);
-        entra.Resource.ProvisioningTaskCompletionSource!.SetException(new InvalidOperationException("Provisioning failed."));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Same(credential.Secret, env["AzureAd__ClientCredentials__0__Base64EncodedValue"]);
+        Assert.False(entra.Resource.ProvisioningTaskCompletionSource!.Task.IsCompleted);
         Assert.Equal(first.Base64EncodedValue, await credential.Secret.GetValueAsync(TestContext.Current.CancellationToken));
+        Assert.False(entra.Resource.ProvisioningTaskCompletionSource.Task.IsCompleted);
     }
 
     [Fact]

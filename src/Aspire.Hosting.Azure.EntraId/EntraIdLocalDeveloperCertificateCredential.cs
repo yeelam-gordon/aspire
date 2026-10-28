@@ -54,22 +54,7 @@ internal sealed class EntraIdLocalDeveloperCertificateCredential : EntraIdClient
         }
 
         base.EmitEnvironmentVariables(envVars, prefix, separator, application, consumer, executionContext);
-        // Keep the secret parameter visible to ExpressionResolver, which marks a ReferenceExpression
-        // containing a secret parameter as sensitive. Wrapping it in an opaque provider loses that flag.
-        envVars[$"{prefix}{separator}Base64EncodedValue"] = ReferenceExpression.Create($"{new ProvisioningGate(application)}{Secret}");
+        envVars[$"{prefix}{separator}Base64EncodedValue"] = Secret;
         return true;
-    }
-
-    private sealed class ProvisioningGate(EntraIdApplicationResource application)
-        : IValueProvider, IManifestExpressionProvider, IValueWithReferences
-    {
-        public string ValueExpression => string.Empty;
-        public IEnumerable<object> References => [application];
-
-        public async ValueTask<string?> GetValueAsync(CancellationToken cancellationToken = default)
-        {
-            await application.ClientIdOutputReference.GetValueAsync(cancellationToken).ConfigureAwait(false);
-            return string.Empty;
-        }
     }
 }
