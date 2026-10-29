@@ -1,31 +1,54 @@
 name: Compare ARM64 developer builds
-run-name: Broad managed graph normal vs MT (one bounded pair)
+run-name: ${{ inputs.macos_only && 'Missing Mac managed graph (matched-source split run)' || 'Broad managed graph normal vs MT (one bounded pair)' }}
 
 # Fork-only manual experiment, not a regular-PR test-selection consumer.
 on:
   workflow_dispatch:
+    inputs:
+      macos_only:
+        description: Fill the missing Mac measurements without rebuilding Windows
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   measure:
-    if: github.repository == 'yeelam-gordon/aspire' && github.ref == 'refs/heads/perf/arm64-managed-graph'
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      ((github.ref == 'refs/heads/perf/arm64-managed-graph' && !inputs.macos_only) ||
+       (github.ref == 'refs/heads/perf/arm64-managed-graph-mac-followup' && inputs.macos_only))
     name: Managed graph (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-11-vs2026-arm, macos-latest]
+        runner: ${{ fromJSON(inputs.macos_only && '["macos-latest"]' || '["windows-11-vs2026-arm","macos-latest"]') }}
     steps:
       - name: Checkout source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Keep measured scripts, Git version metadata and product identical
+          # to retained Windows run 40918589341, not this selector revision.
+          ref: 2cb6872c01f3537610799afdd35430a5a8c18253
           # Provenance compares this instrumentation revision with its fixed
           # product baseline, which is absent from checkout's default depth 1.
           fetch-depth: 0
+
+      - name: Record workflow versus measured checkout
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne '2cb6872c01f3537610799afdd35430a5a8c18253') {
+            throw 'Unexpected measured checkout.'
+          }
+          $evidence = Join-Path $PWD 'managed-graph-workflow'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          @{ workflowHead = $env:GITHUB_SHA; measuredSource = $actual; runId = $env:GITHUB_RUN_ID } |
+            ConvertTo-Json | Set-Content (Join-Path $evidence 'checkout.json')
 
       - name: Bootstrap isolated native toolchain
         shell: pwsh
@@ -45,6 +68,7 @@ jobs:
         with:
           name: managed-graph-diagnostics-${{ matrix.runner }}
           path: |
+            managed-graph-workflow/
             managed-graph-bootstrap/
             managed-graph-results/*.json
             managed-graph-results/*.log
