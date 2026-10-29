@@ -1,8 +1,14 @@
 name: Compare ARM64 developer builds
+run-name: ${{ inputs.profile_hosting && 'Profile cold Hosting managed compilation' || 'Compare ordinary developer builds' }}
 
 # Dedicated manual experiment; not a regular-PR selection target.
 on:
   workflow_dispatch:
+    inputs:
+      profile_hosting:
+        description: Profile one cold Hosting compiler build instead of throughput samples
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,10 +51,13 @@ jobs:
 
       - name: Measure managed developer build cycles
         shell: pwsh
+        env:
+          PROFILE_HOSTING: ${{ inputs.profile_hosting }}
         run: |
           & (Join-Path $PWD 'Generated Files/arm64-build/developer-build/Measure-DeveloperBuild.ps1') `
             -RepositoryRoot $PWD `
-            -ResultsDirectory (Join-Path $PWD 'developer-build-results')
+            -ResultsDirectory (Join-Path $PWD 'developer-build-results') `
+            -ProfileHosting:($env:PROFILE_HOSTING -eq 'true')
 
       - name: Upload developer build evidence
         if: always()
