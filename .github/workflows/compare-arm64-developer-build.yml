@@ -1,5 +1,5 @@
 name: Compare ARM64 developer builds
-run-name: ${{ inputs.profile_hosting && 'Profile cold Hosting managed compilation' || 'Compare ordinary developer builds' }}
+run-name: ${{ inputs.native_hosting && 'Capture cold Hosting native CPU' || inputs.profile_hosting && 'Profile cold Hosting managed compilation' || 'Compare ordinary developer builds' }}
 
 # Dedicated manual experiment; not a regular-PR selection target.
 on:
@@ -7,6 +7,10 @@ on:
     inputs:
       profile_hosting:
         description: Profile one cold Hosting compiler build instead of throughput samples
+        type: boolean
+        default: false
+      native_hosting:
+        description: Capture one cold Hosting build with WPR or Xcode Time Profiler (diagnostic, not throughput)
         type: boolean
         default: false
 
@@ -17,7 +21,8 @@ jobs:
   measure:
     if: >-
       github.repository == 'yeelam-gordon/aspire' &&
-      github.ref == 'refs/heads/perf/arm64-developer-build'
+      ((github.ref == 'refs/heads/perf/arm64-developer-build' && !inputs.native_hosting) ||
+       (github.ref == 'refs/heads/perf/arm64-native-compiler-profile' && inputs.native_hosting && !inputs.profile_hosting))
     name: Developer builds (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -53,11 +58,13 @@ jobs:
         shell: pwsh
         env:
           PROFILE_HOSTING: ${{ inputs.profile_hosting }}
+          NATIVE_HOSTING: ${{ inputs.native_hosting }}
         run: |
           & (Join-Path $PWD 'Generated Files/arm64-build/developer-build/Measure-DeveloperBuild.ps1') `
             -RepositoryRoot $PWD `
             -ResultsDirectory (Join-Path $PWD 'developer-build-results') `
-            -ProfileHosting:($env:PROFILE_HOSTING -eq 'true')
+            -ProfileHosting:($env:PROFILE_HOSTING -eq 'true') `
+            -NativeHosting:($env:NATIVE_HOSTING -eq 'true')
 
       - name: Upload developer build evidence
         if: always()
