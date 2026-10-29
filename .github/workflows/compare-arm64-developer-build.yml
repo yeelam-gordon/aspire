@@ -1,0 +1,125 @@
+name: Compare ARM64 developer builds
+run-name: Diagnose ordinary Hosting compiler CPU (single cold/no-op/edit)
+
+# SOURCE-ONLY candidate for the existing registered manual workflow path:
+# .github/workflows/compare-arm64-developer-build.yml
+# No PR/push/schedule trigger, no run_* gate, no profiler/native capture.
+on:
+  workflow_dispatch:
+    inputs:
+      observe_idle:
+        description: Add one 500 ms unbuilt server-background observation; never subtract it
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  compiler_cpu:
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      github.ref == 'refs/heads/perf/arm64-compiler-cpu-counters'
+    name: Compiler CPU (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-11-vs2026-arm, macos-latest]
+    steps:
+      # Pins, native runner labels and project-scoped bootstrap are unchanged
+      # from the successful corrected primary harness (run 40883755604).
+      - name: Checkout instrumentation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: instrumentation
+          persist-credentials: false
+
+      - name: Checkout unchanged product
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 06efc928e31486923754398007f4f78003e04ee3
+          path: product
+          persist-credentials: false
+
+      - name: Restore repository toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
+              [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString() -ne 'Arm64') {
+            throw 'Both measurements require native ARM64 processes and OS.'
+          }
+          $root = Join-Path $PWD 'product'
+          $evidence = Join-Path $PWD 'compiler-cpu-results'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          @{
+            productSource = (& git -C $root rev-parse HEAD)
+            instrumentationSource = (& git -C (Join-Path $PWD 'instrumentation') rev-parse HEAD)
+            eventSource = $env:GITHUB_SHA
+            imageOS = $env:ImageOS
+            imageVersion = $env:ImageVersion
+            interpretation = 'Single diagnostic sample per case, not throughput or population parity.'
+          } | ConvertTo-Json | Set-Content (Join-Path $evidence 'provenance.json')
+          $entry = if ($IsWindows) { 'restore.cmd' } else { 'restore.sh' }
+          # Keep the corrected primary harness's absolute project path: Arcade
+          # evaluates explicit project paths from its own tooling project.
+          $project = Join-Path $root 'src/Aspire.Hosting/Aspire.Hosting.csproj'
+          Push-Location $root
+          try {
+            & (Join-Path $root $entry) -configuration Debug -projects $project *> (Join-Path $evidence 'toolchain-restore.log')
+            if ($LASTEXITCODE -ne 0) { throw 'Repository toolchain restore failed.' }
+          }
+          finally { Pop-Location }
+
+      - name: Source fixtures and native SDK preflight
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $PWD 'product'
+          $helper = Join-Path $PWD 'instrumentation/Generated Files/arm64-build/developer-build/compiler-cpu-counters'
+          $evidence = Join-Path $PWD 'compiler-cpu-results'
+          & (Join-Path $helper 'Test-CompilerIdentity.ps1') -ResultsDirectory (Join-Path $evidence 'source-checks')
+          & (Join-Path $helper 'Measure-CompilerCpu.ps1') -RepositoryRoot $root -ResultsDirectory (Join-Path $evidence 'preflight') -PreflightOnly
+
+      - name: Build offline binlog reader outside measurement
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $PWD 'product'
+          $helper = Join-Path $PWD 'instrumentation/Generated Files/arm64-build/developer-build/compiler-cpu-counters'
+          $evidence = Join-Path $PWD 'compiler-cpu-results'
+          $dotnet = Join-Path $root $(if ($IsWindows) { '.dotnet/dotnet.exe' } else { '.dotnet/dotnet' })
+          Push-Location $root
+          try {
+            # These flags affect only the tiny standalone replay utility and
+            # leave no compiler server to contaminate the cold product build.
+            & $dotnet build (Join-Path $helper 'binlog-reader/Reader.csproj') --configuration Debug --nologo /p:UseSharedCompilation=false /nr:false *> (Join-Path $evidence 'reader-build.log')
+            if ($LASTEXITCODE -ne 0) { throw 'Offline binlog reader build failed.' }
+          }
+          finally { Pop-Location }
+
+      - name: Diagnose three ordinary Hosting commands
+        shell: pwsh
+        env:
+          OBSERVE_IDLE: ${{ inputs.observe_idle }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $PWD 'product'
+          $helper = Join-Path $PWD 'instrumentation/Generated Files/arm64-build/developer-build/compiler-cpu-counters'
+          $results = Join-Path $PWD 'compiler-cpu-results/measurements'
+          $idle = if ($env:OBSERVE_IDLE -eq 'true') { 500 } else { 0 }
+          & (Join-Path $helper 'Measure-CompilerCpu.ps1') -RepositoryRoot $root -ResultsDirectory $results -IdleObservationMilliseconds $idle
+          & (Join-Path $helper 'Verify-Counters.ps1') -ResultsDirectory $results
+
+      - name: Upload compiler counter evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compiler-cpu-${{ matrix.runner }}
+          path: |
+            compiler-cpu-results/
+            product/artifacts/log/
+          if-no-files-found: error
+          retention-days: 7
