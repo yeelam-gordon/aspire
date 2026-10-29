@@ -62,3 +62,19 @@ The sole consumer is this manual fork workflow. No regular-PR job, selected
 test target, artifact consumer, reusable workflow, AzDO pipeline or test
 project changes; no test-selection map update is required. Existing checkout
 and upload action pins are unchanged from prior fork experiments.
+
+## Executed run and correction
+
+The sole run, [40905277534](https://github.com/yeelam-gordon/aspire/actions/runs/40905277534),
+executed revision `89fe66162a145e181770351796c181e4eedb0a1b`. Both runners
+bootstrapped and restored successfully, then failed before any arm because
+checkout's default shallow history omitted the fixed product baseline needed
+by the provenance comparison. This is an instrumentation defect, not product
+failure or a performance result. Both diagnostics artifacts were retained;
+there are no timed build samples, build-arm binlogs or retained product DLLs.
+The native collector was not invoked. Mac acquired capacity in this run.
+
+The subsequent correction sets the existing checkout action's `fetch-depth: 0`
+and reports a missing baseline explicitly. Local shallow-history reproduction
+and unshallow validation cover that correction. It is not CI-validated and
+**must not be dispatched under this exhausted one-run authorization**.

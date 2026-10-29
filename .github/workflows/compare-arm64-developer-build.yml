@@ -23,6 +23,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Provenance compares this instrumentation revision with its fixed
+          # product baseline, which is absent from checkout's default depth 1.
+          fetch-depth: 0
 
       - name: Bootstrap isolated native toolchain
         shell: pwsh

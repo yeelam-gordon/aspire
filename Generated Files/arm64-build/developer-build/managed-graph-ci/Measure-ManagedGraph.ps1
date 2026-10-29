@@ -67,6 +67,8 @@ try
 {
     Assert-CleanSource
     $revision = (& git rev-parse HEAD).Trim()
+    & git cat-file -e "$source^{commit}"
+    if ($LASTEXITCODE -ne 0) { throw 'Fixed product baseline is absent from checkout history; use fetch-depth: 0.' }
     $changedFromSource = @(& git diff --name-only $source HEAD)
     if ($LASTEXITCODE -ne 0 -or @($changedFromSource | Where-Object {
         $_ -ne '.github/workflows/compare-arm64-developer-build.yml' -and -not $_.StartsWith($relativeEvidence)
