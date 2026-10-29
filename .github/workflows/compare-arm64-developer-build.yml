@@ -1,0 +1,63 @@
+name: Compare ARM64 developer builds
+run-name: Broad managed graph normal vs MT (one bounded pair)
+
+# Fork-only manual experiment, not a regular-PR test-selection consumer.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    if: github.repository == 'yeelam-gordon/aspire' && github.ref == 'refs/heads/perf/arm64-managed-graph'
+    name: Managed graph (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-11-vs2026-arm, macos-latest]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Bootstrap isolated native toolchain
+        shell: pwsh
+        run: |
+          & (Join-Path $PWD 'Generated Files/arm64-build/developer-build/managed-graph-ci/Bootstrap-ManagedGraph.ps1') `
+            -RepositoryRoot $PWD -ResultsDirectory (Join-Path $PWD 'managed-graph-bootstrap')
+
+      - name: Measure normal MT MT normal
+        shell: pwsh
+        run: |
+          & (Join-Path $PWD 'Generated Files/arm64-build/developer-build/managed-graph-ci/Measure-ManagedGraph.ps1') `
+            -RepositoryRoot $PWD -ResultsDirectory (Join-Path $PWD 'managed-graph-results')
+
+      - name: Upload diagnostics independently
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: managed-graph-diagnostics-${{ matrix.runner }}
+          path: |
+            managed-graph-bootstrap/
+            managed-graph-results/*.json
+            managed-graph-results/*.log
+            managed-graph-results/*/*.json
+            managed-graph-results/*/*.log
+            managed-graph-results/*/*.binlog
+            managed-graph-results/*/*.patch
+            artifacts/log/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload retained DLLs independently
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: managed-graph-dlls-${{ matrix.runner }}
+          path: managed-graph-results/*/dlls/
+          if-no-files-found: warn
+          retention-days: 7
