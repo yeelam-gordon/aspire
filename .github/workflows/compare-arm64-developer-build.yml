@@ -1,0 +1,56 @@
+name: Compare ARM64 developer builds
+
+# Dedicated manual experiment; not a regular-PR selection target.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      github.ref == 'refs/heads/perf/arm64-developer-build'
+    name: Developer builds (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-11-vs2026-arm, macos-latest]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore repository toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
+              [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString() -ne 'Arm64') {
+            throw 'Both measurements require native ARM64 processes and OS.'
+          }
+          $entry = if ($IsWindows) { 'restore.cmd' } else { 'restore.sh' }
+          & (Join-Path $PWD $entry) -configuration Debug -projects src/Aspire.Hosting/Aspire.Hosting.csproj
+          if ($LASTEXITCODE -ne 0) { throw 'Repository toolchain restore failed.' }
+
+      - name: Measure managed developer build cycles
+        shell: pwsh
+        run: |
+          & (Join-Path $PWD 'Generated Files/arm64-build/developer-build/Measure-DeveloperBuild.ps1') `
+            -RepositoryRoot $PWD `
+            -ResultsDirectory (Join-Path $PWD 'developer-build-results')
+
+      - name: Upload developer build evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: developer-build-${{ matrix.runner }}
+          path: |
+            developer-build-results/
+            artifacts/log/
+          if-no-files-found: error
+          retention-days: 7
