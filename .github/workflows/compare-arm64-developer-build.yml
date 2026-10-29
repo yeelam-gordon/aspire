@@ -33,8 +33,14 @@ jobs:
               [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString() -ne 'Arm64') {
             throw 'Both measurements require native ARM64 processes and OS.'
           }
+          $evidence = Join-Path $PWD 'developer-build-results'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
           $entry = if ($IsWindows) { 'restore.cmd' } else { 'restore.sh' }
-          & (Join-Path $PWD $entry) -configuration Debug -projects src/Aspire.Hosting/Aspire.Hosting.csproj
+          # Arcade evaluates explicit project paths from its tooling project;
+          # an absolute path works consistently on Windows and macOS.
+          $project = Join-Path $PWD 'src/Aspire.Hosting/Aspire.Hosting.csproj'
+          if (-not (Test-Path -LiteralPath $project -PathType Leaf)) { throw 'Hosting project is missing.' }
+          & (Join-Path $PWD $entry) -configuration Debug -projects $project *> (Join-Path $evidence 'toolchain-restore.log')
           if ($LASTEXITCODE -ne 0) { throw 'Repository toolchain restore failed.' }
 
       - name: Measure managed developer build cycles
