@@ -20,6 +20,11 @@
     <!-- Keep NuGet Audit warnings visible without failing developer/CI builds.
          Remove after upgrading to Arcade 11, which supplies this exemption. -->
     <WarningsNotAsErrors Condition="'$(TreatNuGetAuditWarningsAsErrors)' != 'true'">$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+    <!-- The build wrapper forwards evaluated exemptions through Arcade again. Keep the first
+         occurrence (CS1591;NU1901;CS1591 becomes CS1591;NU1901) so response files stay stable.
+         Property functions also work for WarningPolicy.proj's evaluation-only query. -->
+    <WarningsNotAsErrors>$([System.String]::Join(';', $(WarningsNotAsErrors.Split(';', System.StringSplitOptions.RemoveEmptyEntries))))</WarningsNotAsErrors>
+    <WarningsNotAsErrors>$([System.Text.RegularExpressions.Regex]::Replace($(WarningsNotAsErrors), '(^|;)([^;]+)(?=;|$)(?&lt;=(?:^|;)\2;.*)', '', 'System.Text.RegularExpressions.RegexOptions.IgnoreCase, CultureInvariant'))</WarningsNotAsErrors>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <SuppressNETCoreSdkPreviewMessage>true</SuppressNETCoreSdkPreviewMessage>
