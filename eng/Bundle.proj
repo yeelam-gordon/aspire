@@ -121,12 +121,16 @@
       <_ManagedBinlog Condition="'$(ContinuousIntegrationBuild)' == 'true'">-bl:$(ArtifactsLogDir)PublishManaged.binlog</_ManagedBinlog>
       <_DashboardBinlog Condition="'$(ContinuousIntegrationBuild)' == 'true'">-bl:$(ArtifactsLogDir)PublishDashboard.binlog</_DashboardBinlog>
       <_TerminalHostBinlog Condition="'$(ContinuousIntegrationBuild)' == 'true'">-bl:$(ArtifactsLogDir)PublishTerminalHost.binlog</_TerminalHostBinlog>
+      <_DashboardBuildArgs>/p:GenerateDocumentationFile=false /p:EnforceCodeStyleInBuild=false</_DashboardBuildArgs>
+      <!-- Match dashboardpack's CI restore and compilation inputs. Changing CI-only package
+           imports, documentation, analyzers, or source mapping invalidates the native output. -->
+      <_DashboardBuildArgs Condition="'$(ContinuousIntegrationBuild)' == 'true'">/p:ContinuousIntegrationBuild=true</_DashboardBuildArgs>
     </PropertyGroup>
     <Message Importance="high" Text="Publishing aspire-managed (self-contained)..." />
     <!-- Publish as self-contained single-file for the target RID -->
     <Exec Command="dotnet publish &quot;$(ManagedProjectPath)&quot; -c $(Configuration) -r $(TargetRid) --self-contained /p:GenerateDocumentationFile=false /p:EnforceCodeStyleInBuild=false $(_VersionSuffixArg) $(_ManagedBinlog)" />
     <Message Importance="high" Text="Publishing Aspire Dashboard (Native AOT)..." />
-    <Exec Command="dotnet publish &quot;$(DashboardProjectPath)&quot; -c $(Configuration) -r $(TargetRid) /p:PlatformName=$(TargetRid) /p:GenerateDocumentationFile=false /p:EnforceCodeStyleInBuild=false $(_VersionSuffixArg) $(_DashboardBinlog)" />
+    <Exec Command="dotnet publish &quot;$(DashboardProjectPath)&quot; -c $(Configuration) -r $(TargetRid) /p:PlatformName=$(TargetRid) $(_DashboardBuildArgs) $(_VersionSuffixArg) $(_DashboardBinlog)" />
     <Message Importance="high" Text="Publishing Aspire TerminalHost (Native AOT)..." />
     <Exec Command="dotnet publish &quot;$(TerminalHostProjectPath)&quot; -c $(Configuration) -r $(TargetRid) /p:GenerateDocumentationFile=false /p:EnforceCodeStyleInBuild=false $(_VersionSuffixArg) $(_TerminalHostBinlog)" />
   </Target>

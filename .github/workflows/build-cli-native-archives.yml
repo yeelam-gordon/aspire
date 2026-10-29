@@ -63,6 +63,13 @@ jobs:
         shell: pwsh
         run: Write-Output "NUGET_PACKAGES=$env:GITHUB_WORKSPACE/.nuget/packages" >> $env:GITHUB_ENV
 
+      # Arcade CI restore uses .packages on macOS. Keep later dotnet publishes in
+      # that same cache so generated imports and native compilation inputs stay stable.
+      - name: Configure NuGet package cache (macOS)
+        if: runner.os == 'macOS'
+        shell: pwsh
+        run: Write-Output "NUGET_PACKAGES=$env:GITHUB_WORKSPACE/.packages" >> $env:GITHUB_ENV
+
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
