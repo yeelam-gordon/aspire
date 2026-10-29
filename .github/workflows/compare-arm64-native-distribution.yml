@@ -4,6 +4,11 @@ name: Compare ARM64 native CLI distribution
 # This measures native CLI distribution, not all managed integration packages.
 on:
   workflow_dispatch:
+    inputs:
+      profile_restore:
+        description: Collect paired restore diagnostics instead of a throughput baseline
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -12,7 +17,8 @@ jobs:
   compare:
     if: >-
       github.repository == 'yeelam-gordon/aspire' &&
-      github.ref == 'refs/heads/perf/arm64-build-comparison'
+      github.ref == 'refs/heads/perf/arm64-build-comparison' &&
+      !inputs.profile_restore
     # A local reusable workflow and its default checkout use the same event SHA
     # for both runners. Keep build phases, verification and uploads unchanged.
     uses: ./.github/workflows/build-cli-native-archives.yml
@@ -23,3 +29,101 @@ jobs:
           {"os": "windows-latest", "runner": "windows-11-vs2026-arm", "rids": "win-arm64"},
           {"os": "macos-latest", "runner": "macos-latest", "rids": "osx-arm64"}
         ]
+
+  profile_restore:
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      github.ref == 'refs/heads/perf/arm64-build-comparison' &&
+      inputs.profile_restore
+    name: Profile restore (${{ matrix.rid }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-11-vs2026-arm
+            rid: win-arm64
+          - runner: macos-latest
+            rid: osx-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Bootstrap native SDK and record provenance
+        shell: pwsh
+        env:
+          TARGET_RID: ${{ matrix.rid }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -ne $env:GITHUB_SHA) {
+            throw 'Unexpected source revision.'
+          }
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
+              [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString() -ne 'Arm64') {
+            throw 'Restore profiling requires native ARM64 runners.'
+          }
+          $evidence = Join-Path $PWD 'restore-diagnostics'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          @{
+            sourceSha = $source
+            targetRid = $env:TARGET_RID
+            imageOS = $env:ImageOS
+            imageVersion = $env:ImageVersion
+            logicalProcessorCount = [Environment]::ProcessorCount
+            scope = 'Profiled fresh dependency restore only; not a throughput or native-build result.'
+          } | ConvertTo-Json | Set-Content (Join-Path $evidence 'provenance.json')
+          $entry = if ($IsWindows) { 'dotnet.cmd' } else { 'dotnet.sh' }
+          & (Join-Path $PWD $entry) --info *> (Join-Path $evidence 'sdk-info.log')
+          if ($LASTEXITCODE -ne 0) { throw 'SDK bootstrap failed.' }
+
+      - name: Capture restore CPU, GC and HTTP traces
+        shell: pwsh
+        env:
+          TARGET_RID: ${{ matrix.rid }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $PWD 'restore-diagnostics'
+          $env:NUGET_PACKAGES = Join-Path $PWD $(if ($IsWindows) { '.nuget/packages' } else { '.packages' })
+          # Runtime startup tracing covers each managed child separately by PID,
+          # including MSBuild/NuGet. It does not collect native/kernel or Defender events.
+          # https://learn.microsoft.com/dotnet/core/diagnostics/eventpipe#trace-using-environment-variables
+          $env:DOTNET_EnableEventPipe = '1'
+          $env:DOTNET_EventPipeOutputPath = Join-Path $evidence 'restore-{pid}.nettrace'
+          $env:DOTNET_EventPipeOutputStreaming = '1'
+          $env:DOTNET_EventPipeCircularMB = '10'
+          $env:DOTNET_EventPipeConfig = 'Microsoft-DotNETCore-SampleProfiler:0:5,Microsoft-Windows-DotNETRuntime:1:4,System.Net.Http:FFFFFFFFFFFFFFFF:4,System.Net.NameResolution:FFFFFFFFFFFFFFFF:4,System.Net.Security:FFFFFFFFFFFFFFFF:4,System.Net.Sockets:FFFFFFFFFFFFFFFF:4'
+          $env:MSBUILDTERMINALLOGGER = 'false'
+          $entry = if ($IsWindows) { 'build.cmd' } else { 'build.sh' }
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          & (Join-Path $PWD $entry) -ci -restore -configuration Release `
+            /p:BuildBundleDepsOnly=true "/p:TargetRids=$env:TARGET_RID" `
+            "/bl:$evidence/restore.binlog" *> (Join-Path $evidence 'restore.log')
+          $code = $LASTEXITCODE
+          $timer.Stop()
+          Remove-Item Env:DOTNET_EnableEventPipe
+          @{
+            exitCode = $code
+            elapsedSeconds = $timer.Elapsed.TotalSeconds
+            instrumentation = 'Managed CPU samples, GC and HTTP/DNS/TLS/socket events; no kernel/native-stack coverage.'
+          } | ConvertTo-Json | Set-Content (Join-Path $evidence 'result.json')
+          Get-ChildItem -LiteralPath $evidence -Filter '*.nettrace' |
+            Select-Object Name, Length | ConvertTo-Json |
+            Set-Content (Join-Path $evidence 'trace-inventory.json')
+          if ($code -ne 0) { throw "Restore failed with exit code $code." }
+          if (@(Get-ChildItem -LiteralPath $evidence -Filter '*.nettrace' |
+              Where-Object Length -gt 1024).Count -eq 0) {
+            throw 'No usable-sized trace files were produced; capture is unvalidated.'
+          }
+
+      - name: Upload restore diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: restore-diagnostics-${{ matrix.rid }}
+          path: restore-diagnostics/
+          if-no-files-found: error
+          retention-days: 7
