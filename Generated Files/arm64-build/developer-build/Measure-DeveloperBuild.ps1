@@ -80,13 +80,54 @@ function Invoke-DotnetCase([string]$Project, [string]$Case, [string]$Kind, [stri
     if ($code -ne 0) { throw "Benchmark command failed; inspect $log" }
 }
 
-function Invoke-NativeTool([string]$Tool, [string[]]$ToolArguments)
+function Invoke-NativeTool([string]$Tool, [string[]]$ToolArguments, [switch]$AllowFailure)
 {
     "> $Tool $ToolArguments" | Add-Content -LiteralPath $nativeLog
     $output = & $Tool @ToolArguments 2>&1 | Out-String
     $output | Add-Content -LiteralPath $nativeLog
-    if ($LASTEXITCODE -ne 0) { throw "Native tool failed ($LASTEXITCODE); inspect $nativeLog" }
+    if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) { throw "Native tool failed ($LASTEXITCODE); inspect $nativeLog" }
     return $output
+}
+
+function Get-WprNativeQuality([string]$StopOutput, [bool]$StopSucceeded)
+{
+    # WPR can return success while warning:
+    # "This trace has dropped 1493079 events. Please record this trace again."
+    # Accept grouped counts such as "1,493,079"; missing/unrecognized output is not zero loss.
+    $warning = [regex]::Match($StopOutput, '(?im)^\s*This trace has dropped (?<count>[0-9]+(?:[,.\u00a0\u202f ][0-9]{3})*) events\.\s*Please record this trace again\.\s*$')
+    $reportedLoss = $null
+    [long]$count = 0
+    if ($warning.Success -and [long]::TryParse(($warning.Groups['count'].Value -replace '[^0-9]', ''), [ref]$count)) { $reportedLoss = $count }
+    $status = if ($reportedLoss -gt 0) { 'degraded' }
+    elseif (-not $StopSucceeded -or $StopOutput -notmatch 'The trace was successfully saved\.' -or
+        ($StopOutput -match '(?i)dropped|events?\s+lost' -and $null -eq $reportedLoss)) { 'unknown' }
+    else { 'unverified' }
+    return [pscustomobject]@{
+        status = $status
+        reportedLostEvents = $reportedLoss
+        stopSucceeded = $StopSucceeded
+        message = switch ($status)
+        {
+            'degraded' { 'WPR final stop reported event loss; retained trace is degraded.' }
+            'unknown' { 'Stop/finalization output is failed or unrecognized; quality is unknown.' }
+            'unverified' { 'no loss warning reported; independent offline verification required' }
+        }
+        independentOfflineVerificationRequired = $true
+        cpuCoverage = 'Unvalidated; independently verify compiler PID CPU samples/stacks and final stream loss.'
+        collectorStatusLog = 'native-tools.log'
+    }
+}
+
+function Write-NativeFailure([string]$Phase, [object]$Failure, [string]$Trace)
+{
+    $message = "$Phase`n$($Failure | Out-String)"
+    $message | Add-Content (Join-Path $ResultsDirectory 'native-errors.log')
+    Write-Host $message
+    foreach ($suffix in @('.stdout.log', '.stderr.log', '.notify.stdout.log', '.notify.stderr.log'))
+    {
+        $path = "$Trace$suffix"
+        if (Test-Path -LiteralPath $path) { Write-Host "$path`n$(Get-Content -LiteralPath $path -Raw)" }
+    }
 }
 
 function Invoke-NativeHosting([string[]]$BuildArguments)
@@ -95,6 +136,8 @@ function Invoke-NativeHosting([string[]]$BuildArguments)
     $instance = "Hosting-$([guid]::NewGuid().ToString('N'))"
     $trace = Join-Path $ResultsDirectory $(if ($IsWindows) { 'Hosting.etl' } else { 'Hosting.trace' })
     $started = $false
+    $captureError = $collector = $waiter = $null
+    $ready = $false
     try
     {
         if ($IsWindows)
@@ -103,14 +146,14 @@ function Invoke-NativeHosting([string[]]$BuildArguments)
             $profiles = Invoke-NativeTool $tool @('-profiles')
             $help = Invoke-NativeTool $tool @('-help', 'start')
             $null = Invoke-NativeTool $tool @('-help', 'stop')
-            if ($profiles -notmatch '\bCPU\b' -or $profiles -notmatch '\bDotNET\b' -or $help -notmatch '-instancename') { throw 'Required WPR capabilities unavailable.' }
+            if ($profiles -notmatch '\bCPU\b' -or $help -notmatch '-instancename') { throw 'Required WPR capabilities unavailable.' }
             if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'WPR requires an elevated hosted runner.' }
-            # CPU includes system-wide sampling/scheduling, including future compiler children.
-            # Keep DotNET rundown and default stop-time PDB generation:
+            # CPU.verbose retains sampling/scheduling stacks and CLR runtime/rundown providers
+            # without the broad DotNET profile. Keep default stop-time PDB generation:
             # https://learn.microsoft.com/windows-hardware/test/wpt/wpr-command-line-options
-            $null = Invoke-NativeTool $tool @('-exportprofile', 'CPU+DotNET', (Join-Path $ResultsDirectory 'native-profiles.wprp'), '-filemode')
+            $null = Invoke-NativeTool $tool @('-exportprofile', 'CPU.verbose', (Join-Path $ResultsDirectory 'native-profiles.wprp'), '-filemode')
             $started = $true
-            $null = Invoke-NativeTool $tool @('-start', 'CPU', '-start', 'DotNET', '-filemode', '-recordtempto', $ResultsDirectory, '-instancename', $instance)
+            $null = Invoke-NativeTool $tool @('-start', 'CPU.verbose', '-filemode', '-recordtempto', $ResultsDirectory, '-instancename', $instance)
         }
         elseif ($IsMacOS)
         {
@@ -120,29 +163,49 @@ function Invoke-NativeHosting([string[]]$BuildArguments)
             $help = Invoke-NativeTool $tool @('help', 'record')
             $exportHelp = Invoke-NativeTool $tool @('help', 'export')
             $templates = Invoke-NativeTool $tool @('list', 'templates')
-            foreach ($flag in @('--all-processes', '--time-limit', '--no-prompt'))
+            foreach ($flag in @('--all-processes', '--time-limit', '--no-prompt', '--notify-tracing-started'))
             {
                 if (-not $help.Contains($flag)) { throw "xctrace lacks $flag" }
             }
             if ($templates -notmatch 'Time Profiler' -or $exportHelp -notmatch '--toc' -or $exportHelp -notmatch '--xpath') { throw 'Required Xcode template/export capabilities unavailable.' }
-            $null = Invoke-NativeTool sudo @('-n', 'true')
+            $notify = (Get-Command notifyutil -ErrorAction Stop).Source
+            $notifyHelp = Invoke-NativeTool $notify @('-h')
+            foreach ($flag in @('-1', '-s', '-g'))
+            {
+                if (-not $notifyHelp.Contains($flag)) { throw "notifyutil lacks documented $flag support." }
+            }
+            $notification = "com.aspire.hosting.$instance"
+            # Register before launching xctrace. State 1 confirms the waiter registered;
+            # notifyutil -g emits "<notification-name> 1", not a buffered recorder message.
+            # https://github.com/apple-oss-distributions/Libnotify/blob/main/notifyutil/notifyutil.c
+            $waiter = Start-Process $notify -ArgumentList @('-1', $notification, '-s', $notification, '1') `
+                -RedirectStandardOutput "$trace.notify.stdout.log" -RedirectStandardError "$trace.notify.stderr.log" -PassThru
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            while ((Invoke-NativeTool $notify @('-g', $notification)).Trim() -ne "$notification 1")
+            {
+                if ($waiter.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw 'Darwin notification waiter did not register.' }
+                Start-Sleep -Milliseconds 100
+            }
             # All-processes, not --launch: VBCSCompiler is a child/server, not the build launcher.
-            # The runner's own help above is authoritative; runtime permissions remain a probe.
-            "> sudo -n $tool record --template 'Time Profiler' --all-processes --no-prompt --time-limit 120s --output $trace" | Add-Content $nativeLog
-            $collector = Start-Process sudo -ArgumentList @('-n', "`"$tool`"", 'record', '--template', '"Time Profiler"', '--all-processes', '--no-prompt', '--time-limit', '120s', '--output', "`"$trace`"") `
+            # Run as the compiler's user. Unsupported headless permissions fail; never use sudo
+            # or change security settings. xctrace(1) documents --notify-tracing-started.
+            "> $tool record --template 'Time Profiler' --all-processes --no-prompt --time-limit 120s --notify-tracing-started $notification --output $trace" | Add-Content $nativeLog
+            $collector = Start-Process $tool -ArgumentList @('record', '--template', '"Time Profiler"', '--all-processes', '--no-prompt', '--time-limit', '120s', '--notify-tracing-started', $notification, '--output', "`"$trace`"") `
                 -RedirectStandardOutput "$trace.stdout.log" -RedirectStandardError "$trace.stderr.log" -PassThru
+            "Owned xctrace PID=$($collector.Id); notifyutil PID=$($waiter.Id)" | Add-Content $nativeLog
         }
         else { throw 'Native capture supports only Windows and macOS.' }
         $started = $true
         if ($IsMacOS)
         {
             $deadline = [DateTime]::UtcNow.AddSeconds(30)
-            # xctrace emits "Recording started..." after initialization. Unknown output fails closed.
-            while (((Get-Content "$trace.stdout.log", "$trace.stderr.log" -Raw) -join "`n") -notmatch 'Recording started')
+            while (-not $waiter.WaitForExit(250))
             {
-                if ($collector.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw 'xctrace did not confirm recording readiness.' }
-                Start-Sleep -Milliseconds 250
+                if ($collector.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw 'xctrace did not send its readiness notification; inspect collector permissions/errors.' }
             }
+            if ($waiter.ExitCode -ne 0 -or $collector.HasExited) { throw 'xctrace readiness notification failed or collector exited.' }
+            $ready = $true
+            "Received xctrace readiness notification: $notification" | Add-Content $nativeLog
         }
         Invoke-DotnetCase 'Hosting' 'native-cold-build' 'profiled-analysis' $BuildArguments
         if ($IsMacOS -and $collector.HasExited) { throw 'xctrace exited before the build completed; coverage is incomplete.' }
@@ -163,36 +226,92 @@ function Invoke-NativeHosting([string[]]$BuildArguments)
         @($compilers) | ConvertTo-Json | Set-Content (Join-Path $ResultsDirectory 'native-compiler-processes.json')
         if (-not $compilers) { throw 'No private-SDK VBCSCompiler child identified; do not infer launcher-only coverage.' }
     }
+    catch
+    {
+        $captureError = $_
+        Write-NativeFailure 'Primary native capture error (before finalization)' $_ $trace
+        throw
+    }
     finally
     {
         if ($started -and $IsWindows)
         {
             try { $null = Invoke-NativeTool $tool @('-status', 'collectors', '-details', '-instancename', $instance) }
-            finally { $null = Invoke-NativeTool $tool @('-stop', $trace, 'Cold Hosting managed build', '-instancename', $instance) }
+            finally
+            {
+                $stopOutput = ''
+                $stopSucceeded = $false
+                try
+                {
+                    $stopOutput = Invoke-NativeTool $tool @('-stop', $trace, 'Cold Hosting managed build', '-instancename', $instance) -AllowFailure
+                    $stopSucceeded = $LASTEXITCODE -eq 0
+                }
+                finally
+                {
+                    $quality = Get-WprNativeQuality $stopOutput $stopSucceeded
+                    $quality | ConvertTo-Json | Set-Content (Join-Path $ResultsDirectory 'native-quality.json')
+                }
+                if ($quality.status -ne 'unverified') { throw "Native capture quality is $($quality.status); inspect native-quality.json and retained ETL/logs." }
+            }
             if ((Get-Item $trace).Length -lt 1024) { throw 'No usable-sized native ETL captured.' }
         }
-        elseif ($started -and $IsMacOS)
+        elseif ($IsMacOS -and ($collector -or $waiter))
         {
-            # Let this bounded recording finalize naturally even after a build/readiness failure.
-            if (-not $collector.WaitForExit(180000))
+            $finalized = $exported = $false
+            try
             {
-                # sudo forwards signals to its command (https://www.sudo.ws/docs/man/sudo.man/).
-                $null = Invoke-NativeTool sudo @('-n', 'kill', '-INT', "$($collector.Id)")
-                if (-not $collector.WaitForExit(30000)) { throw 'Owned xctrace did not finalize after SIGINT; inspect retained logs.' }
+                # Signal the actual owned xctrace PID immediately, including when never ready.
+                if ($collector -and -not $collector.HasExited)
+                {
+                    $null = Invoke-NativeTool /bin/kill @('-INT', "$($collector.Id)")
+                    if (-not $collector.WaitForExit(30000))
+                    {
+                        Stop-Process -Id $collector.Id -Force
+                        throw 'Owned xctrace did not finalize after SIGINT; partial trace is invalid.'
+                    }
+                }
+                if ($collector -and $collector.ExitCode -ne 0) { throw 'Owned xctrace failed; partial trace is invalid.' }
+                $finalized = $null -ne $collector
+                if ($ready -and -not $captureError)
+                {
+                    $tocPath = Join-Path $ResultsDirectory 'native-toc.xml'
+                    $null = Invoke-NativeTool $tool @('export', '--input', $trace, '--toc', '--output', $tocPath)
+                    # Use only the documented xctrace(1) export schema, if present in this trace's TOC:
+                    # https://keith.github.io/xcode-man-pages/xctrace.1.html (--xpath example).
+                    $tables = @(([xml](Get-Content $tocPath -Raw)).SelectNodes('//table[@schema]') |
+                        Where-Object { $_.schema -eq 'time-profile' } |
+                        ForEach-Object { $_.schema } | Sort-Object -Unique)
+                    if (-not $tables) { throw 'No recognized CPU table in TOC; raw Mac trace requires compatible Xcode.' }
+                    foreach ($schema in $tables)
+                    {
+                        $null = Invoke-NativeTool $tool @('export', '--input', $trace, '--xpath', "//table[@schema='$schema']", '--output', (Join-Path $ResultsDirectory "native-$schema.xml"))
+                        if (-not ([xml](Get-Content (Join-Path $ResultsDirectory "native-$schema.xml") -Raw)).SelectNodes('//row').Count) { throw "Exported CPU table $schema has no rows." }
+                    }
+                    $exported = $true
+                }
             }
-            if ($collector.ExitCode -ne 0) { throw 'Owned xctrace failed; inspect retained logs.' }
-            $tocPath = Join-Path $ResultsDirectory 'native-toc.xml'
-            $null = Invoke-NativeTool $tool @('export', '--input', $trace, '--toc', '--output', $tocPath)
-            # Use only the documented xctrace(1) export schema, if present in this trace's TOC:
-            # https://keith.github.io/xcode-man-pages/xctrace.1.html (--xpath example).
-            $tables = @(([xml](Get-Content $tocPath -Raw)).SelectNodes('//table[@schema]') |
-                Where-Object { $_.schema -eq 'time-profile' } |
-                ForEach-Object { $_.schema } | Sort-Object -Unique)
-            if (-not $tables) { throw 'No recognized CPU table in TOC; raw Mac trace requires compatible Xcode.' }
-            foreach ($schema in $tables)
+            catch
             {
-                $null = Invoke-NativeTool $tool @('export', '--input', $trace, '--xpath', "//table[@schema='$schema']", '--output', (Join-Path $ResultsDirectory "native-$schema.xml"))
-                if (-not ([xml](Get-Content (Join-Path $ResultsDirectory "native-$schema.xml") -Raw)).SelectNodes('//row').Count) { throw "Exported CPU table $schema has no rows." }
+                Write-NativeFailure 'Native finalization/cleanup error' $_ $trace
+                if (-not $captureError) { throw }
+            }
+            finally
+            {
+                @{
+                    status = if ($exported) { 'unverified' } else { 'partial-invalid' }
+                    readinessReceived = $ready
+                    collectorFinalized = $finalized
+                    cpuCoverage = 'Unvalidated; independently verify compiler PID CPU samples/stacks, symbols and trace completeness.'
+                } | ConvertTo-Json | Set-Content (Join-Path $ResultsDirectory 'native-quality.json')
+                if ($waiter -and -not $waiter.HasExited)
+                {
+                    try { Stop-Process -Id $waiter.Id -Force }
+                    catch
+                    {
+                        Write-NativeFailure 'Native notification-waiter cleanup error' $_ $trace
+                        if (-not $captureError) { throw }
+                    }
+                }
             }
         }
     }
@@ -207,7 +326,7 @@ $revision = (& git -C $RepositoryRoot rev-parse HEAD).Trim()
     osDescription = [Runtime.InteropServices.RuntimeInformation]::OSDescription
     imageOS = $env:ImageOS
     imageVersion = $env:ImageVersion
-    scope = if ($NativeHosting) { 'Diagnostic cold Hosting CPU capture, ReportAnalyzer retained; WPR CPU/scheduling, Mac Time Profiler CPU samples, not managed thread-time TopN or throughput. Mac records 120s including idle tail; correlate compiler PID and build UTC interval. Mac JIT symbols and wait/scheduling attribution are not guaranteed.' } elseif ($ProfileHosting) { 'Diagnostic cold Hosting build with ReportAnalyzer and managed thread/GC tracing; elapsed time is not a throughput baseline.' } else { 'Debug managed project builds with normal defaults; no publish/pack or AOT toggles. Restore/clean are setup, not build-only latency.' }
+    scope = if ($NativeHosting) { 'Diagnostic cold Hosting CPU capture, ReportAnalyzer retained; WPR CPU/scheduling, Mac Time Profiler CPU samples, not managed thread-time TopN or throughput. Mac recording is bounded at 120s; correlate compiler PID and build UTC interval. Mac JIT symbols and wait/scheduling attribution are not guaranteed.' } elseif ($ProfileHosting) { 'Diagnostic cold Hosting build with ReportAnalyzer and managed thread/GC tracing; elapsed time is not a throughput baseline.' } else { 'Debug managed project builds with normal defaults; no publish/pack or AOT toggles. Restore/clean are setup, not build-only latency.' }
     compilerTiming = 'Binlogs contain Csc/compiler tasks; project wall time also includes evaluation, generators, analyzers and output work.'
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ResultsDirectory 'provenance.json')
 if ($IsWindows)
@@ -245,12 +364,21 @@ try
             if ($LASTEXITCODE -ne 0) { throw 'Could not establish a cold compiler-server profile.' }
             if ($NativeHosting)
             {
+                $nativeError = $null
                 try { Invoke-NativeHosting ($build + @('/p:ReportAnalyzer=true', "/bl:$(Join-Path $ResultsDirectory 'Hosting-native-cold-build.binlog')")) }
-                catch { $_ | Out-String | Add-Content (Join-Path $ResultsDirectory 'native-tools.log'); throw }
+                catch { $nativeError = $_; $_ | Out-String | Add-Content (Join-Path $ResultsDirectory 'native-tools.log'); throw }
                 finally
                 {
-                    & $dotnet build-server shutdown --msbuild --vbcscompiler *> (Join-Path $ResultsDirectory 'servers-after.log')
-                    if ($LASTEXITCODE -ne 0) { throw 'Native profile compiler-server cleanup failed.' }
+                    try
+                    {
+                        & $dotnet build-server shutdown --msbuild --vbcscompiler *> (Join-Path $ResultsDirectory 'servers-after.log')
+                        if ($LASTEXITCODE -ne 0) { throw 'Native profile compiler-server cleanup failed.' }
+                    }
+                    catch
+                    {
+                        Write-NativeFailure 'Native SDK-server cleanup error' $_ (Join-Path $ResultsDirectory 'Hosting.trace')
+                        if (-not $nativeError) { throw }
+                    }
                 }
                 continue
             }

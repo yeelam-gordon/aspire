@@ -66,13 +66,31 @@ jobs:
             -ProfileHosting:($env:PROFILE_HOSTING -eq 'true') `
             -NativeHosting:($env:NATIVE_HOSTING -eq 'true')
 
-      - name: Upload developer build evidence
+      # Keep diagnostics independent of unreadable or unfinished native trace bundles.
+      - name: Upload developer build diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: developer-build-${{ matrix.runner }}
           path: |
-            developer-build-results/
+            developer-build-results/*.log
+            developer-build-results/*.stderr
+            developer-build-results/*.json
+            developer-build-results/*.xml
+            developer-build-results/*.wprp
+            developer-build-results/*.binlog
             artifacts/log/
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload raw compiler traces
+        if: always() && (inputs.native_hosting || inputs.profile_hosting)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: developer-build-traces-${{ matrix.runner }}
+          path: |
+            developer-build-results/*.etl
+            developer-build-results/*.trace/
+            developer-build-results/*.nettrace
+          if-no-files-found: warn
           retention-days: 7
