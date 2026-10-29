@@ -31,7 +31,12 @@ jobs:
 
   build_cli_archives:
     name: Build CLI (${{ matrix.targets.rids }})
-    if: ${{ github.repository == 'microsoft/aspire' }}
+    # Permit only the owned fork's manually dispatched comparison branch.
+    if: >-
+      github.repository == 'microsoft/aspire' ||
+      (github.repository == 'yeelam-gordon/aspire' &&
+       github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/perf/arm64-build-comparison')
     runs-on: ${{ matrix.targets.runner }}
     strategy:
       matrix:
@@ -65,6 +70,37 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Record ARM64 comparison provenance
+        if: github.repository == 'yeelam-gordon/aspire'
+        shell: pwsh
+        env:
+          COMPARISON_RUNNER: ${{ matrix.targets.runner }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -ne $env:GITHUB_SHA) {
+            throw 'Checkout does not match the comparison source SHA.'
+          }
+          $provenance = [ordered]@{
+            sourceSha = $sourceSha
+            configuration = $env:BUILD_CONFIGURATION
+            targetRid = $env:TARGET_RIDS
+            runnerLabel = $env:COMPARISON_RUNNER
+            osArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            processArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+            logicalProcessorCount = [Environment]::ProcessorCount
+            osDescription = [Runtime.InteropServices.RuntimeInformation]::OSDescription
+            osVersion = [Environment]::OSVersion.VersionString
+            imageOS = $env:ImageOS
+            imageVersion = $env:ImageVersion
+          }
+          $json = $provenance | ConvertTo-Json
+          Write-Output $json
+          "### Native CLI distribution comparison`n`n``````json`n$json`n``````" >> $env:GITHUB_STEP_SUMMARY
+          if ($provenance.osArchitecture -ne 'Arm64' -or $provenance.processArchitecture -ne 'Arm64') {
+            throw 'The comparison requires native ARM64 OS and PowerShell processes.'
+          }
 
       # Node.js is required because PackDotnetTool now depends on PackNpmPackage,
       # which shells out to `npm pack` to produce the @microsoft/aspire-cli npm
@@ -107,6 +143,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Split-Path $buildLog -Parent) | Out-Null
           Copy-Item -LiteralPath $temporaryLog -Destination $buildLog
           exit $buildExitCode
+
+      - name: Record restored comparison SDK
+        if: github.repository == 'yeelam-gordon/aspire'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The preceding build restores the pinned SDK; do not time another restore.
+          & '${{ runner.os == 'Windows' && './dotnet.cmd' || './dotnet.sh' }}' --info
+          exit $LASTEXITCODE
 
       - name: Verify Native AOT Dashboard warnings
         shell: pwsh

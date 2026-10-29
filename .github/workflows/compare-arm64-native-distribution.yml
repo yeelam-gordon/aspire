@@ -1,0 +1,25 @@
+name: Compare ARM64 native CLI distribution
+
+# Dedicated manual experiment, not a regular-PR test-selection target.
+# This measures native CLI distribution, not all managed integration packages.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      github.ref == 'refs/heads/perf/arm64-build-comparison'
+    # A local reusable workflow and its default checkout use the same event SHA
+    # for both runners. Keep build phases, verification and uploads unchanged.
+    uses: ./.github/workflows/build-cli-native-archives.yml
+    with:
+      configuration: Release
+      targets: >-
+        [
+          {"os": "windows-latest", "runner": "windows-11-vs2026-arm", "rids": "win-arm64"},
+          {"os": "macos-latest", "runner": "macos-latest", "rids": "osx-arm64"}
+        ]
