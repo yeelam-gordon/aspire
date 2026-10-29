@@ -31,7 +31,11 @@ jobs:
 
   build_cli_archives:
     name: Build CLI (${{ matrix.targets.rids }})
-    if: ${{ github.repository == 'microsoft/aspire' }}
+    # Validation-only guard on this isolated branch; no upstream/default-branch publication.
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/perf/dashboard-native-warning-policy-validation'
     runs-on: ${{ matrix.targets.runner }}
     strategy:
       matrix:
@@ -140,6 +144,53 @@ jobs:
           /p:ContinuousIntegrationBuild=true
           "/bl:$env:GITHUB_WORKSPACE/artifacts/log/$env:BUILD_CONFIGURATION/BundlePayload.binlog"
           @versionOverrideArgs
+
+      - name: P08 compare first archive with aligned Dashboard publish
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = if ($IsWindows) { 'python' } else { 'python3' }
+          @'
+          import json, pathlib, sys, zipfile
+          rid, configuration = sys.argv[1:]
+          root = pathlib.Path.cwd()
+          archive = root / "artifacts" / "DashboardArtifacts" / configuration / rid / f"aspire-dashboard-{rid}.zip"
+          publish = root / "artifacts" / "bin" / "Aspire.Dashboard" / rid / configuration / "net11.0" / rid / "publish"
+          output = root / "artifacts" / "log" / configuration / "P08-dashboard-content.json"
+          expected = {
+              p.relative_to(publish).as_posix()
+              for p in publish.rglob("*")
+              if p.is_file() and p.suffix not in (".pdb", ".dbg")
+              and not any(part.endswith(".dSYM") for part in p.parts)
+          }
+          compared = []
+          with zipfile.ZipFile(archive) as source:
+              entries = [item for item in source.infolist() if not item.is_dir()]
+              names = {item.filename for item in entries}
+              assert len(entries) == len(names), "Duplicate first-archive members"
+              assert names == expected, f"Intended file-set mismatch: {sorted(names ^ expected)}"
+              for item in entries:
+                  path = pathlib.PurePosixPath(item.filename)
+                  assert not path.is_absolute() and ".." not in path.parts
+                  with source.open(item) as first, (publish / item.filename).open("rb") as second:
+                      while True:
+                          a, b = first.read(1024 * 1024), second.read(1024 * 1024)
+                          assert a == b, f"Dashboard bytes changed: {item.filename}"
+                          if not a:
+                              break
+                  compared.append({"path": item.filename, "bytes": item.file_size, "zipCrc32": f"{item.CRC:08x}"})
+          result = {
+              "rid": rid, "firstArchive": str(archive), "alignedPublish": str(publish),
+              "sameIntendedFileSet": True, "allComparedBytesEqual": True,
+              "fileCount": len(compared), "files": compared,
+              "symbolExclusion": "Existing dashboardpack excludes .pdb/.dbg/.dSYM from the first shipping archive",
+              "normalization": "None; compares full executable and asset bytes"
+          }
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+          print(json.dumps({key: value for key, value in result.items() if key != "files"}, indent=2))
+          '@ | & $python - $env:TARGET_RIDS $env:BUILD_CONFIGURATION
+          if ($LASTEXITCODE -ne 0) { throw 'P08 first-archive/aligned-publish comparison failed.' }
 
       - name: Smoke test bundled Native AOT TerminalHost
         if: ${{ !contains(matrix.targets.rids, 'musl') && ((runner.arch == 'ARM64' && endsWith(matrix.targets.rids, 'arm64')) || (runner.arch == 'X64' && endsWith(matrix.targets.rids, 'x64'))) }}
@@ -323,6 +374,35 @@ jobs:
           path: artifacts/DashboardArtifacts/${{ inputs.configuration }}/${{ matrix.targets.rids }}/aspire-dashboard-${{ matrix.targets.rids }}.zip
           retention-days: 15
           if-no-files-found: error
+
+      - name: P08 record acquired host and execution identity
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $directory = "artifacts/log/$env:BUILD_CONFIGURATION"
+          New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          $processor = if ($IsWindows) {
+            (Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | ConvertTo-Json -Compress)
+          } else {
+            (& sysctl -n machdep.cpu.brand_string hw.physicalcpu hw.logicalcpu hw.memsize) -join "`n"
+          }
+          [ordered]@{
+            sourceSha = $env:GITHUB_SHA
+            workflowRef = $env:GITHUB_WORKFLOW_REF
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runnerName = $env:RUNNER_NAME
+            runnerOs = $env:RUNNER_OS
+            runnerArch = $env:RUNNER_ARCH
+            osArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            processArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+            processor = $processor
+            nugetPackages = $env:NUGET_PACKAGES
+          } | ConvertTo-Json -Depth 4 | Set-Content "$directory/P08-host.json"
+          if (Test-Path .dotnet/dotnet${{ runner.os == 'Windows' && '.exe' || '' }}) {
+            & ./.dotnet/dotnet${{ runner.os == 'Windows' && '.exe' || '' }} --info > "$directory/P08-dotnet-info.txt"
+          }
 
       - name: Upload logs
         if: always()
