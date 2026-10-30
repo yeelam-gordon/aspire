@@ -163,11 +163,101 @@ try
     finally{$bad.Dispose()}
     if($partial.stagePassed -or $partial.errors.Count -lt 1 -or -not(Test-Path (Join-Path $partial.metadataRoot 'good.log')))
     {throw 'Metadata copy failure was swallowed or discarded other diagnostics.'}
+
+    $compoundRoot=Join-Path $Output 'compound-copy-report-fault'
+    $compoundEvidence=Join-Path $compoundRoot 'evidence'
+    $null=New-Item -ItemType Directory -Path $compoundEvidence
+    $compoundBadPath=Join-Path $compoundEvidence '00-unreadable.log'
+    $compoundBad=[IO.FileStream]::new($compoundBadPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    $laterPath=Join-Path $compoundEvidence 'zz-later-readable.log'
+    $laterBytes=[Text.Encoding]::UTF8.GetBytes('Closed diagnostic copied AFTER both real filesystem failures.')
+    [IO.File]::WriteAllBytes($laterPath,$laterBytes)
+    $compoundStage=Join-Path $compoundRoot 'retained'
+    $compoundOutput=Join-Path $compoundRoot 'stage.outputs'
+    $compoundConsole=[IO.StringWriter]::new()
+    $hadOutput=Test-Path Env:GITHUB_OUTPUT
+    $oldOutput=$env:GITHUB_OUTPUT
+    $compoundFailure=$null
+    $breakpoint=$null
+    try
+    {
+        # StageRoot must be new, so insert the owned file/directory collision
+        # immediately before the REAL reporter writes. No reporter is replaced
+        # or mocked: its filesystem persistence genuinely fails.
+        $failureScript=Join-Path $PSScriptRoot 'Failure.ps1'
+        $line=[Array]::IndexOf([string[]](Get-Content $failureScript),'    try{Write-MatureClosedJson $value $path}')+1
+        if($line -le 0){throw 'Real reporter fault-injection location missing.'}
+        $breakpoint=Set-PSBreakpoint -Script $failureScript -Line $line -Action {
+            if($Phase -ceq 'metadata-copy-00-unreadable.log')
+            {
+                $later=Join-Path (Split-Path $Directory) 'zz-later-readable.log'
+                [IO.File]::WriteAllText($Directory,"OWNED reporter path collision; laterAlreadyStaged=$([IO.File]::Exists($later))")
+            }
+        }
+        $env:GITHUB_OUTPUT=$compoundOutput
+        [Console]::SetError($compoundConsole)
+        try{& (Join-Path $PSScriptRoot 'Stage-Retention.ps1') -EvidenceRoot $compoundEvidence -StageRoot $compoundStage}
+        catch{$compoundFailure=$_}
+    }
+    finally
+    {
+        [Console]::SetError($originalConsole)
+        if($null -ne $breakpoint){Remove-PSBreakpoint -Breakpoint $breakpoint}
+        if($hadOutput){$env:GITHUB_OUTPUT=$oldOutput}else{Remove-Item Env:GITHUB_OUTPUT}
+    }
+    try
+    {
+        $compoundText=$compoundConsole.ToString()
+        [IO.File]::WriteAllText((Join-Path $compoundRoot 'console.log'),$compoundText)
+        $compoundManifest=Get-Content (Join-Path $compoundStage 'metadata\retention-manifest.json') -Raw|ConvertFrom-Json
+        $outputs=@(Get-Content $compoundOutput)
+        if($null -eq $compoundFailure -or $compoundFailure.Exception.Message -notlike 'P49 retention incomplete:*' -or
+            $compoundManifest.stagePassed -or $compoundManifest.finalizedRawStaged -or $compoundManifest.rawFilesAvailable -or
+            $compoundManifest.errors.Count -ne 1 -or $compoundManifest.reportingErrors.Count -ne 1 -or
+            $compoundManifest.errors[0].phase -cne 'metadata-copy-00-unreadable.log' -or
+            $compoundManifest.errors[0].message -notlike "*$compoundBadPath*" -or
+            $compoundManifest.errors[0].exception -notmatch 'System.IO.IOException' -or
+            $compoundManifest.errors[0].stack -notmatch 'Copy-MatureClosedFile' -or
+            $compoundManifest.errors[0].invocation -notmatch 'Retention\.ps1:\d+ char:\d+' -or
+            $compoundManifest.reportingErrors[0].originalPhase -cne 'metadata-copy-00-unreadable.log' -or
+            $compoundManifest.reportingErrors[0].message -notlike '*retention-errors*' -or
+            $compoundText -notlike "*$compoundBadPath*" -or $compoundText -notmatch 'secondary retention reporting failure' -or
+            ($outputs -join "`n") -cne "raw_files_available=false`nraw_recording_complete=false" -or
+            (Get-Content (Join-Path $compoundStage 'metadata\retention-errors') -Raw) -notlike '*laterAlreadyStaged=False')
+        {throw 'Compound copy/persistence fault replaced original error, aborted retention or misreported stage outputs.'}
+        $compoundZip=Join-Path $compoundRoot 'diagnostics-after-compound-fault.zip'
+        [IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $compoundStage 'metadata'),$compoundZip)
+        $z=[IO.Compression.ZipFile]::OpenRead($compoundZip)
+        try
+        {
+            $entry=@($z.Entries|Where-Object FullName -ceq 'zz-later-readable.log')[0]
+            if($null -eq $entry){throw 'Later readable diagnostic missing from compound-fault ZIP.'}
+            $bytes=[IO.MemoryStream]::new();$input=$entry.Open()
+            try{$input.CopyTo($bytes)}finally{$input.Dispose()}
+            try
+            {
+                if(-not[Linq.Enumerable]::SequenceEqual[byte]($laterBytes,$bytes.ToArray()))
+                {throw 'Later readable diagnostic bytes changed after compound fault.'}
+            }
+            finally{$bytes.Dispose()}
+        }
+        finally{$z.Dispose()}
+        $compoundStillLocked=$false
+        try{$other=[IO.File]::OpenRead($compoundBadPath);$other.Dispose()}catch [IO.IOException]{$compoundStillLocked=$true}
+        if(-not$compoundStillLocked){throw 'Compound fault lock was released before ZIP proof.'}
+        $compoundProof=@{passed=$true;realCopyLockHeldThroughZip=$true;actualReporterPathCollision=$true
+            manifest=$compoundManifest;outputs=$outputs;stageFailure=$compoundFailure.Exception.Message
+            originalCopyErrorAuthoritative=$true;secondaryReportingErrorSeparate=$true;laterDiagnosticZipBytesEqual=$true
+            console=(Join-Path $compoundRoot 'console.log');zip=$compoundZip}
+        Write-MatureClosedJson $compoundProof (Join-Path $compoundRoot 'proof.json')
+    }
+    finally{$compoundBad.Dispose();$compoundConsole.Dispose()}
     Write-MatureClosedJson @{passed=$true;realScratchLockHeldThroughoutZip=$true;originalCauseRethrown=$true
         originalError=$primary;secondaryError=$secondary;rethrowStack=$caught.ScriptStackTrace;rethrowInvocation=$caught.InvocationInfo.PositionMessage
         consolePath=(Join-Path $evidence 'console.log')
         diagnosticsZip=$zip;rawZip=$rawZip;outputCorpusFiles=119;allOutputBytesEqual=$true;allMetadataZipBytesEqual=$true;all119RawZipBytesEqual=$true;hiddenObjIncluded=$true
         scratchLockInArchives=$false;negativeUnfinalizedRaw=$noFinal;copyFailureExplicit=$partial.errors
+        compoundCopyAndReportingFailure=$compoundProof
         actualRecordings=0;servicesStarted=0;oldScratchGuidUsed=$false} (Join-Path $Output 'test-result.json')
 }
 finally

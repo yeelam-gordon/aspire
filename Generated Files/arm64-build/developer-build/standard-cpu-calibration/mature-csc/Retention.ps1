@@ -31,14 +31,29 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
     $copied=[Collections.Generic.List[object]]::new()
     $omitted=[Collections.Generic.List[object]]::new()
     $errors=[Collections.Generic.List[object]]::new()
+    $reportingErrors=[Collections.Generic.List[object]]::new()
     $rawFiles=[Collections.Generic.List[string]]::new()
     $finalized=$false
     $rawState='missing own successful start/stop receipt'
 
     function Add-RetentionError([Management.Automation.ErrorRecord]$Record,[string]$Phase)
     {
-        $errors.Add(@{phase=$Phase;message=$Record.Exception.Message;error=$Record.ToString();stack=$Record.ScriptStackTrace})
-        $null=Write-MatureFailure $Record (Join-Path $metadata 'retention-errors') $Phase 'staging' @()
+        $errors.Add(@{phase=$Phase;message=$Record.Exception.Message;error=$Record.ToString();stack=$Record.ScriptStackTrace
+            exception=$Record.Exception.ToString();invocation=$Record.InvocationInfo.PositionMessage})
+        try{$null=Write-MatureFailure $Record (Join-Path $metadata 'retention-errors') $Phase 'staging' @()}
+        catch
+        {
+            # Persistence can fail after the original copy error was printed.
+            # Do not let that secondary error abort later copies or the manifest,
+            # and never recursively use the failed reporter to report itself.
+            $reportingErrors.Add(@{kind='retention-error-persistence';originalPhase=$Phase
+                message=$_.Exception.Message;error=$_.ToString();stack=$_.ScriptStackTrace
+                exceptionType=$_.Exception.GetType().FullName;invocation=$_.InvocationInfo.PositionMessage})
+            [Console]::Error.WriteLine("P49 secondary retention reporting failure; originalPhase=$Phase")
+            [Console]::Error.WriteLine($_.Exception.ToString())
+            [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage)
+            [Console]::Error.WriteLine($_.ScriptStackTrace)
+        }
     }
     function Copy-MetadataDirectory([string]$Directory)
     {
@@ -130,7 +145,7 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
         catch{Add-RetentionError $_ "closed-output-$name"}
     }
     $result=@{metadataRoot=$metadata;rawRoot=$raw;metadataFiles=@($copied.ToArray());excludedWithoutTraversal=@($omitted.ToArray())
-        errors=@($errors.ToArray());finalizedRawStaged=$finalized;rawState=$rawState
+        errors=@($errors.ToArray());reportingErrors=@($reportingErrors.ToArray());finalizedRawStaged=$finalized;rawState=$rawState
         safeRawFiles=@($rawFiles.ToArray());rawFilesAvailable=$rawFiles.Count -gt 0
         stagePassed=$errors.Count -eq 0 -and $finalized
         safety='Only closed copied diagnostics, owned finalized archive and explicit manifested bin/obj outputs; no scratch/cache/home/checkout traversal.'}

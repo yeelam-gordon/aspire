@@ -77,6 +77,12 @@ copy failure is explicit metadata and a failed stage, never silent success.
 FileShare.None scratch lock, original/inner plus secondary errors, actual ZIP
 creation while the lock remains held, exact metadata/119-output byte checks
 and negative unfinalized/copy-failure cases. No collector runs.
+The compound case holds an unreadable metadata file and inserts an actual
+owned reporter path collision before its real filesystem write. Original
+copy and secondary persistence errors remain distinct; later diagnostic
+ZIP bytes, incomplete manifest and failed-stage outputs must survive.
+The narrow retention reporting boundary contains persistence failure rather
+than recursively reporting it or aborting the remaining copies.
 `Test-RetentionInvariance.ps1` verifies exact unchanged functions/files and
 build/CPU/collector/cleanup call sequence against d3f2f2ba5a; the completed
 24-case workload proof is reused rather than rerun.
