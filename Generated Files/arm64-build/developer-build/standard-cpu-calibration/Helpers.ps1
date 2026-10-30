@@ -15,7 +15,7 @@ function Test-HostedCpuContext($Context)
         $Context.runnerOS -ceq 'Windows' -and $Context.runnerArch -ceq 'ARM64' -and
         $Context.imageOS -ceq 'win11-vs2026-arm64' -and
         $Context.osArch -ceq 'Arm64' -and $Context.processArch -ceq 'Arm64' -and
-        $Context.runId -match '^\d+$'
+        $Context.runId -match '^\d+$' -and $Context.runAttempt -ceq '1'
 }
 
 function Assert-HostedCpuContext
@@ -25,6 +25,7 @@ function Assert-HostedCpuContext
         ref = $env:GITHUB_REF; event = $env:GITHUB_EVENT_NAME
         runnerEnvironment = $env:RUNNER_ENVIRONMENT; runnerOS = $env:RUNNER_OS
         runnerArch = $env:RUNNER_ARCH; imageOS = $env:ImageOS; runId = $env:GITHUB_RUN_ID
+        runAttempt = $env:GITHUB_RUN_ATTEMPT
         osArch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
         processArch = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
     }

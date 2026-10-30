@@ -16,7 +16,8 @@ jobs:
     if: >-
       github.repository == 'yeelam-gordon/aspire' &&
       github.ref == 'refs/heads/perf/arm64-standard-cpu-calibration' &&
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' &&
+      github.run_attempt == 1
     name: Owned known-work CPU calibration (Windows ARM64 only)
     runs-on: windows-11-vs2026-arm
     timeout-minutes: 15

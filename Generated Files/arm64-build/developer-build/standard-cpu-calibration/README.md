@@ -9,6 +9,7 @@ The existing registered manual workflow
 only on `perf/arm64-standard-cpu-calibration`. There is one Windows ARM64 job,
 at most 15 minutes, no Mac, PR, push or schedule trigger. Both job and script
 require the exact owned fork/ref/manual event and hosted ARM64 image.
+Workflow reruns (`run_attempt > 1`) are rejected by both job and script guards.
 The capture entry point has **no local override**. The first isolated recording
 would be a new known-work calibration, not a retry of a local recording.
 

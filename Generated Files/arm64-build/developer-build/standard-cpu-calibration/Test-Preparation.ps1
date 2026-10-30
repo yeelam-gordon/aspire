@@ -8,15 +8,16 @@ $valid = @{
     ref = 'refs/heads/perf/arm64-standard-cpu-calibration'; event = 'workflow_dispatch'
     runnerEnvironment = 'github-hosted'; runnerOS = 'Windows'; runnerArch = 'ARM64'
     imageOS = 'win11-vs2026-arm64'; osArch = 'Arm64'; processArch = 'Arm64'; runId = '123'
+    runAttempt = '1'
 }
 if (-not (Test-HostedCpuContext $valid)) { throw 'Hosted pure guard positive fixture failed.' }
 $cases = @()
 foreach ($key in $valid.Keys)
 {
     $invalid = $valid.Clone()
-    $invalid[$key] = 'not-owned'
+    $invalid[$key] = if ($key -ceq 'runAttempt') { '2' } else { 'not-owned' }
     $rejected = -not (Test-HostedCpuContext $invalid)
-    $cases += @{ changed = $key; rejected = $rejected }
+    $cases += @{ changed = $key; attempted = $invalid[$key]; rejected = $rejected }
     if (-not $rejected) { throw "Guard failed to reject $key" }
 }
 # Actual entry-point negative fixture is LOCAL only; never simulate an allowed
