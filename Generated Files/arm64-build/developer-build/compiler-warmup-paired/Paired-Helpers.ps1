@@ -29,9 +29,9 @@ function Get-PairedEdit([byte[]]$Original, [int]$Index)
 
 function Compare-PairedTrees([string]$Reference, [string]$Actual)
 {
-    $paths = @(Get-ChildItem -LiteralPath $Reference -Recurse -File |
+    $paths = @(Get-PairedCapturedFiles $Reference |
         ForEach-Object { [IO.Path]::GetRelativePath($Reference, $_.FullName) } | Sort-Object -CaseSensitive)
-    $other = @(Get-ChildItem -LiteralPath $Actual -Recurse -File |
+    $other = @(Get-PairedCapturedFiles $Actual |
         ForEach-Object { [IO.Path]::GetRelativePath($Actual, $_.FullName) } | Sort-Object -CaseSensitive)
     $differences = @()
     if (($paths | ConvertTo-Json -Compress) -cne ($other | ConvertTo-Json -Compress))
@@ -51,6 +51,20 @@ function Compare-PairedTrees([string]$Reference, [string]$Actual)
         passed = $paths.Count -gt 0 -and $differences.Count -eq 0 }
 }
 
+function Get-PairedCapturedFiles([string]$Outputs)
+{
+    # Captures mirror only the controlled artifact bin/obj trees. Never use
+    # Force to walk a checkout, SDK, home, or arbitrary artifact-upload root.
+    foreach ($kind in @('bin','obj'))
+    {
+        $directory = Join-Path $Outputs $kind
+        if (Test-Path -LiteralPath $directory)
+        {
+            Get-ChildItem -LiteralPath $directory -Recurse -File -Force
+        }
+    }
+}
+
 function Get-PairedOutputFiles([string]$Root)
 {
     # Shared Windows/macOS P38 scope: all final bin files (including satellite
@@ -63,10 +77,130 @@ function Get-PairedOutputFiles([string]$Root)
         {
             $directory = Join-Path $Root ([IO.Path]::Combine('artifacts', $kind, $project, 'Debug'))
             if (-not (Test-Path -LiteralPath $directory)) { throw "Missing output root: $directory" }
-            Get-ChildItem -LiteralPath $directory -Recurse -File |
+            # Unix dot names and Windows Hidden attributes both hide generated
+            # .NETCoreApp/.NETStandard AssemblyAttributes.cs without Force.
+            Get-ChildItem -LiteralPath $directory -Recurse -File -Force |
                 Where-Object { $kind -eq 'bin' -or $_.Extension -in @('.cs', '.resources', '.xml', '.json', '.dll', '.pdb') }
         }
     }
+}
+
+function Get-PairedRuntimeFields($Process)
+{
+    if ($null -eq $Process) { return @{ present = $false; complete = $false } }
+    # A retained Unix zombie can still produce a Process object, but expose a
+    # null StartTime/Path. Do not invoke ToUniversalTime on that null property.
+    $start = $Process.StartTime
+    $path = $Process.Path
+    $complete = $start -is [DateTime] -and -not [string]::IsNullOrWhiteSpace($path) -and $Process.Id -gt 0
+    return @{ present = $true; complete = $complete; pid = $Process.Id
+        startTicks = if ($start -is [DateTime]) { $start.ToUniversalTime().Ticks } else { $null }
+        executablePath = $path; startTimeAvailable = $start -is [DateTime] }
+}
+
+function Get-PairedCleanupPlan([object[]]$Identities, [string]$SdkRoot, [DateTime]$Epoch, [bool]$Windows)
+{
+    $byPid = @{}
+    foreach ($identity in $Identities)
+    {
+        if ($identity.pid -le 0 -or $identity.startTicks -lt $Epoch.ToUniversalTime().Ticks -or
+            -not (Test-PrivateSdkPath $identity.executablePath $SdkRoot $Windows) -or
+            $identity.kind -notin @('compiler','msbuild-helper'))
+        {
+            throw 'Cleanup plan contains an unknown/unowned process; no action permitted.'
+        }
+        if ($byPid.ContainsKey("$($identity.pid)") -and $byPid["$($identity.pid)"].startTicks -ne $identity.startTicks)
+        {
+            throw 'PID reuse in pending cleanup identities; no action permitted.'
+        }
+        $byPid["$($identity.pid)"] = $identity
+    }
+    $compilers = @($Identities | Where-Object kind -EQ 'compiler')
+    $parents = @($Identities | Where-Object kind -EQ 'msbuild-helper')
+    $edges = @(
+        foreach ($compiler in $compilers)
+        {
+            $parent = $byPid["$($compiler.parentPid)"]
+            if ($parent -and $parent.kind -eq 'msbuild-helper' -and $parent.startTicks -le $compiler.startTicks)
+            {
+                @{ compiler = $compiler; parent = $parent }
+            }
+        }
+    )
+    return @{ compilers = $compilers; parents = $parents; parentEdges = $edges; identities = $Identities }
+}
+
+function Invoke-PairedCleanupPlan($Plan, [scriptblock]$RequestCompiler, [scriptblock]$StopParent, [scriptblock]$ConfirmAbsent)
+{
+    foreach ($identity in $Plan.compilers) { & $RequestCompiler $identity }
+    # A zombie remains present until its parent reaps it. Request graceful
+    # compiler shutdown first, then reset only independently proven owned
+    # parents BEFORE requiring compiler/native/runtime absence.
+    foreach ($identity in $Plan.parents) { & $StopParent $identity }
+    foreach ($identity in $Plan.identities) { & $ConfirmAbsent $identity }
+}
+
+function Get-PairedExitState($Identity, $Runtime, $Diagnostic, [string]$NativeStart,
+    [bool]$ShutdownAcknowledged, [bool]$OwnedParentReset, [string]$SdkRoot, [bool]$Windows)
+{
+    $nativePresent = $false
+    if ($Windows)
+    {
+        $nativePresent = [bool]$Diagnostic.native
+        if ($nativePresent -and $Diagnostic.native.CreationDate -isnot [DateTime])
+        {
+            throw 'Native Windows birth unavailable; no action or absence claim.'
+        }
+        if ($nativePresent -and ($Diagnostic.native.ProcessId -ne $Identity.pid -or
+            [math]::Abs(($Diagnostic.native.CreationDate.ToUniversalTime().Ticks - $Identity.startTicks) / [TimeSpan]::TicksPerSecond) -gt 0.1))
+        {
+            throw 'Native PID/birth changed during cleanup; refusing reuse.'
+        }
+    }
+    else
+    {
+        if ($Diagnostic.nativeParseError -or
+            -not (($Diagnostic.psExitCode -eq 1 -and $Diagnostic.raw.Count -eq 0) -or
+                ($Diagnostic.psExitCode -eq 0 -and $Diagnostic.raw.Count -eq 1 -and $Diagnostic.native)))
+        {
+            throw 'Native ps query/parse error; absence and parent reaping are not established.'
+        }
+        $nativePresent = $Diagnostic.psExitCode -eq 0
+        if ($nativePresent -and $NativeStart -and $Diagnostic.native.nativeStart -cne $NativeStart)
+        {
+            throw 'Native PID birth changed during cleanup; refusing reuse.'
+        }
+    }
+    if ($Runtime.present -and $Runtime.complete -and
+        -not (Test-OwnedProcessIdentity $Identity $Runtime.pid $Runtime.startTicks $Runtime.executablePath $SdkRoot $Windows))
+    {
+        throw 'Runtime PID/birth/path changed during cleanup; refusing reuse.'
+    }
+    if (-not $nativePresent -and -not $Runtime.present) { return 'absent' }
+    if (-not $Windows -and $nativePresent -and $Diagnostic.native.state.StartsWith('Z', [StringComparison]::Ordinal))
+    {
+        $parentMatches = $Diagnostic.native.parentPid -eq $Identity.parentPid -or
+            ($OwnedParentReset -and $Diagnostic.native.parentPid -eq 1)
+        if (($Identity.kind -eq 'compiler' -and -not $ShutdownAcknowledged) -or -not $NativeStart -or -not $parentMatches)
+        {
+            throw 'Zombie lacks exact acknowledged shutdown/birth/parent proof; never absent.'
+        }
+        return 'owned-zombie'
+    }
+    if ($Runtime.present -and -not $Runtime.complete)
+    {
+        throw 'Runtime birth/path unavailable outside proved zombie state; no action or absence claim.'
+    }
+    if ($nativePresent -and -not $Windows)
+    {
+        if ($Diagnostic.native.state -notmatch '^[RISTU]' -or
+            $Diagnostic.native.nativePath -cne $Identity.executablePath)
+        {
+            throw 'Unknown native state/path; no action or absence claim.'
+        }
+    }
+    if (-not $nativePresent -or -not $Runtime.present) { return 'pending-exit' }
+    return 'owned-live'
 }
 
 function Get-PairedEmbeddedDebug([string]$Outputs)

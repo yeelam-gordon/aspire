@@ -43,10 +43,22 @@ diagnostic; no extra unmeasured compiler-training builds are present.
   profiler or target dependency. Local smoke uses the existing P41 binary.
   Fresh hosted setup retrieves that same library from the already-approved
   dotnet-public feed; no package manifest/NuGet config or action pin changes.
-- Exact owned-pipe native compiler shutdown precedes known owned parent reset.
+- Exact owned-pipe native compiler shutdown **request** precedes known owned
+  parent reset, which precedes required compiler/native/runtime absence.
+  Non-child Unix `WaitForExit` must not block parent reaping. A proved zombie
+  with unavailable runtime birth/path remains present; typed state avoids null
+  method calls without granting kill/exit authority. Reaping can target only
+  independently registered private SDK MSBuild nodes, never a numeric PPID alone.
+  Birth/path/epoch/native-query/reuse failures and every cleanup phase are
+  retained; failed requests/stops are not retried indefinitely.
   PID/birth/path/epoch guards and native absence reject zombies, reuse and
   unknown states. P29's unresolved Mac cause is not presumed fixed.
   Runtimeconfig/compiler/native image bytes and timestamps are never written.
+- Hidden `.NETCoreApp`/`.NETStandard` generated sources are selected/copied/
+  compared with `-Force` only inside controlled bin/obj trees and their captures.
+  Upload explicitly includes hidden files **only** below
+  `compiler-warmup-results/` and `product/artifacts/log/`; guards reject checkout,
+  home, `.git`, traversal and broad/glob upload roots.
 
 ## Local checks
 
@@ -80,3 +92,11 @@ Windows smoke is harness validation, **not** a performance result. Actual Mac
 API/trace/cleanup coverage, full twenty-edit trajectories and hosted acquisition
 remain unvalidated until a separate fresh parent-owned gate. No push or
 dispatch is authorized by source readiness.
+
+Run `41003828322` remains rejected: Mac completed one twenty-edit lifetime, then
+retained a defunct compiler under its owned MSBuild parent; finally cleanup hit
+the unavailable-StartTime null-method path. Windows archives lost two declared
+dot-generated files, while Mac enumeration omitted them. These repairs do not
+reconstruct old missing bytes or prove historical P29's cause. Captured-state
+ordering/null/reuse fixtures and real Windows Hidden-attribute copy/compare/ZIP
+fixtures are local checks, **not native Mac or GitHub artifact-upload passes**.

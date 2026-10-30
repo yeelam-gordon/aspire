@@ -152,5 +152,8 @@ jobs:
           path: |
             compiler-warmup-results/
             product/artifacts/log/
+          # Only these controlled evidence roots; never upload the checkout,
+          # .git, home or credential directories. Preserve dot-generated files.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

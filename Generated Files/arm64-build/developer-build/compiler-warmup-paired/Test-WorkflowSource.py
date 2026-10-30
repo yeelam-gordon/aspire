@@ -42,23 +42,44 @@ assert re.search(r"(?m)^\s*-EditCount 20\s*$", measurement)
 assert measurement.count("-EditCount") == 1 and "-LocalSmoke" not in measurement
 assert steps[-1]["if"] == "always()"
 assert steps[-1]["with"]["if-no-files-found"] == "error"
-assert "compiler-warmup-results/" in steps[-1]["with"]["path"]
+
+
+def validate_upload_roots(upload):
+    """Including hidden files is safe only inside these dedicated evidence roots."""
+    assert upload["include-hidden-files"] == "true"
+    paths = [line.strip() for line in upload["path"].splitlines() if line.strip()]
+    assert len(paths) == len(set(paths)) == 2
+    assert set(paths) == {"compiler-warmup-results/", "product/artifacts/log/"}
+
+
+validate_upload_roots(steps[-1]["with"])
+for bad_path in (".", "./", "product/", "instrumentation/", ".git/", "~/", "/Users/runner/",
+                 "compiler-warmup-results/../../", "product/artifacts/log/**", "!product/.git/"):
+    candidate = dict(steps[-1]["with"])
+    candidate["path"] = "compiler-warmup-results/\n" + bad_path
+    try:
+        validate_upload_roots(candidate)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"Uncontrolled hidden upload accepted: {bad_path}")
 baseline = subprocess.check_output(
     ["git", "-C", str(root), "show", "4bdcfc201670d1dcb6cf4df80dc7259502713ded:" + relative],
     text=True,
 )
 assert re.findall(r"uses:\s*(\S+)", text) == re.findall(r"uses:\s*(\S+)", baseline)
 harness = (pathlib.Path(__file__).parent / "Measure-PairedWarmup.ps1").read_text(encoding="utf-8")
+cleanup = (pathlib.Path(__file__).parent / "Paired-Cleanup.ps1").read_text(encoding="utf-8")
 assert re.search(r"\[ValidateSet\(1,\s*20\)\]\[int\]\$EditCount\s*=\s*20", harness)
 assert "$expectedCases = 2 * (2 + $EditCount)" in harness
 assert "$lifetimes = @(1..3)" in harness
 assert "if ($diagnostic) { @('cold','edit1','edit2') }" in harness
 assert "early = @(1..5); late = @(16..20)" in harness
 assert "0x3000000038:5" in harness and "DOTNET_EventPipeCircularMB = '100'" in harness
-assert not re.search(r"build-server\s+shutdown|Stop-Process\s+-Name|taskkill", harness, re.I)
+assert not re.search(r"build-server\s+shutdown|Stop-Process\s+-Name|taskkill", harness + cleanup, re.I)
 assert "/p:UseSharedCompilation" not in harness and "/nr:" not in harness
 assert "candidate" not in harness.lower() and "New-PgoCandidate" not in harness
 assert not re.search(r"WriteAllBytes\(\$config|SetLastWriteTimeUtc\(\$config", harness)
 assert "Get-PairedRuntimeImageHeader $bytes $IsWindows" in harness
-assert "Test-PairedAbsence" in harness and "ConvertFrom-PairedMacState" in harness
+assert "ConvertFrom-PairedMacState" in harness and "Get-PairedExitState" in cleanup
 print("Manual-only YAML, unchanged pins, 44-build A/A, separate 3-build diagnostic, normal-policy and source guards passed.")

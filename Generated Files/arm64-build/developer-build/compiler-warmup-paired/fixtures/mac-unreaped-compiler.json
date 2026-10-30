@@ -1,0 +1,25 @@
+{
+  "sourceRun": 41003828322,
+  "sdkRoot": "/Users/runner/work/aspire/aspire/product/.dotnet",
+  "epochUtc": "2026-10-30T04:36:30.415879Z",
+  "compiler": {
+    "pid": 8003,
+    "parentPid": 7995,
+    "kind": "compiler",
+    "startTicks": 639289319005579300,
+    "executablePath": "/Users/runner/work/aspire/aspire/product/.dotnet/sdk/11.0.100-rc.2.26504.105/Roslyn/bincore/VBCSCompiler",
+    "commandEvidence": "/Users/runner/wo /Users/runner/work/aspire/aspire/product/.dotnet/sdk/11.0.100-rc.2.26504.105/Roslyn/bincore/VBCSCompiler -pipename:6LY8lAN6xiQiejBXitmCSRhdC5b7vESdenWBGvnAu+Y"
+  },
+  "parent": {
+    "pid": 7995,
+    "parentPid": 1,
+    "kind": "msbuild-helper",
+    "startTicks": 639289318993163560,
+    "executablePath": "/Users/runner/work/aspire/aspire/product/.dotnet/sdk/11.0.100-rc.2.26504.105/MSBuild",
+    "commandEvidence": "/Users/runner/wo /Users/runner/work/aspire/aspire/product/.dotnet/sdk/11.0.100-rc.2.26504.105/MSBuild /nologo /nodemode:8"
+  },
+  "nativeStart": "Fri Oct 30 04:38:20 2026",
+  "rawZombie": " 8003  7995 Z<   Fri Oct 30 04:38:20 2026     <defunct>",
+  "shutdownClientExitCode": 0,
+  "runtimeNullFieldsNote": "Regression model of unavailable zombie StartTime/Path; raw captured ps state above is actual. No Mac Process API runs in this fixture."
+}

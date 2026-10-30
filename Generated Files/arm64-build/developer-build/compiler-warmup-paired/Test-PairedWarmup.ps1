@@ -175,6 +175,78 @@ Check 'Retain observed identity missing from runtime enumeration until exact abs
     $pending = @(Get-PairedPendingIdentities $observed @($new) @{ '5673:123' = $true })
     Require ($pending.Count -eq 1 -and $pending[0].startTicks -eq 456L)
 }
+$captured = Get-Content (Join-Path $PSScriptRoot ([IO.Path]::Combine('fixtures','mac-unreaped-compiler.json'))) -Raw | ConvertFrom-Json
+$epoch = [DateTime]$captured.epochUtc
+$compiler = $captured.compiler
+$parent = $captured.parent
+$zombieDiagnostic = @{ psExitCode = 0; raw = @($captured.rawZombie)
+    native = ConvertFrom-PairedMacState $captured.rawZombie $compiler.pid }
+$nullRuntime = Get-PairedRuntimeFields ([pscustomobject]@{ Id = $compiler.pid; StartTime = $null; Path = $null })
+Check 'Unavailable zombie properties are explicit typed state, not a null method or absence' {
+    Require ($nullRuntime.present -and -not $nullRuntime.complete -and -not $nullRuntime.startTimeAvailable)
+    Require ($null -eq $nullRuntime.startTicks)
+    Require ((Get-PairedExitState $compiler $nullRuntime $zombieDiagnostic $captured.nativeStart $true $false $captured.sdkRoot $false) -ceq 'owned-zombie')
+    Reject { Get-PairedExitState $compiler $nullRuntime $zombieDiagnostic $captured.nativeStart $false $false $captured.sdkRoot $false }
+}
+Check 'Captured zombie requests then resets only proved parent before compiler absence' {
+    $plan = Get-PairedCleanupPlan @($parent,$compiler) $captured.sdkRoot $epoch $false
+    Require ($plan.parentEdges.Count -eq 1 -and $plan.parentEdges[0].parent.pid -eq 7995)
+    $events = [Collections.Generic.List[string]]::new()
+    $state = @{ parentStopped = $false }
+    Invoke-PairedCleanupPlan $plan {
+        param($identity)
+        $events.Add("request:$($identity.pid)")
+        Require ((Get-PairedExitState $compiler $nullRuntime $zombieDiagnostic $captured.nativeStart $true $false $captured.sdkRoot $false) -ceq 'owned-zombie')
+    } {
+        param($identity)
+        Require ($identity.pid -eq $parent.pid -and $identity.kind -eq 'msbuild-helper')
+        $events.Add("stop:$($identity.pid)")
+        $state.parentStopped = $true
+    } {
+        param($identity)
+        Require $state.parentStopped
+        $events.Add("absent:$($identity.pid)")
+        Require ((Get-PairedExitState $identity @{present=$false;complete=$false} @{psExitCode=1;raw=@()} `
+            $captured.nativeStart $true $true $captured.sdkRoot $false) -ceq 'absent')
+    }
+    Require ($events.IndexOf('request:8003') -lt $events.IndexOf('stop:7995'))
+    Require ($events.IndexOf('stop:7995') -lt $events.IndexOf('absent:8003'))
+}
+Check 'No unproved numeric PPID, frontend, foreign path, old epoch or reused PID becomes a stop target' {
+    $foreignParent = $parent | ConvertTo-Json | ConvertFrom-Json
+    $foreignParent.executablePath = '/foreign/MSBuild'
+    Reject { Get-PairedCleanupPlan @($foreignParent,$compiler) $captured.sdkRoot $epoch $false }
+    $old = $parent | ConvertTo-Json | ConvertFrom-Json
+    $old.startTicks = $epoch.AddSeconds(-1).Ticks
+    Reject { Get-PairedCleanupPlan @($old,$compiler) $captured.sdkRoot $epoch $false }
+    $reused = $parent | ConvertTo-Json | ConvertFrom-Json
+    $reused.startTicks++
+    Reject { Get-PairedCleanupPlan @($parent,$reused,$compiler) $captured.sdkRoot $epoch $false }
+    $frontend = $parent | ConvertTo-Json | ConvertFrom-Json
+    $frontend.kind = 'other-private-sdk-process'
+    Reject { Get-PairedCleanupPlan @($frontend,$compiler) $captured.sdkRoot $epoch $false }
+    $withoutParent = Get-PairedCleanupPlan @($compiler) $captured.sdkRoot $epoch $false
+    Require ($withoutParent.parents.Count -eq 0 -and $withoutParent.parentEdges.Count -eq 0)
+    Require (@($withoutParent.parents | Where-Object pid -EQ 8003).Count -eq 0)
+}
+Check 'Zombie transitions preserve PID reuse, native query errors, unknown fields and parent proof failures' {
+    Reject { Get-PairedExitState $compiler $nullRuntime $zombieDiagnostic 'Fri Oct 30 04:38:21 2026' $true $false $captured.sdkRoot $false }
+    $reusedRuntime = @{present=$true;complete=$true;pid=8003;startTicks=$compiler.startTicks+1;executablePath=$compiler.executablePath}
+    Reject { Get-PairedExitState $compiler $reusedRuntime $zombieDiagnostic $captured.nativeStart $true $false $captured.sdkRoot $false }
+    Reject { Get-PairedExitState $compiler $nullRuntime @{psExitCode=1;raw=@('permission denied')} $captured.nativeStart $true $false $captured.sdkRoot $false }
+    Reject { Get-PairedExitState $compiler $nullRuntime @{psExitCode=2;raw=@()} $captured.nativeStart $true $false $captured.sdkRoot $false }
+    $foreign = @{psExitCode=0;raw=@('captured');native=@{state='Z<';nativeStart=$captured.nativeStart;parentPid=12345}}
+    Reject { Get-PairedExitState $compiler $nullRuntime $foreign $captured.nativeStart $true $false $captured.sdkRoot $false }
+    $adopted = @{psExitCode=0;raw=@('captured');native=@{state='Z<';nativeStart=$captured.nativeStart;parentPid=1}}
+    Reject { Get-PairedExitState $compiler $nullRuntime $adopted $captured.nativeStart $true $false $captured.sdkRoot $false }
+    Require ((Get-PairedExitState $compiler $nullRuntime $adopted $captured.nativeStart $true $true $captured.sdkRoot $false) -ceq 'owned-zombie')
+}
+Check 'Cleanup callback failure propagates without silently running later phases' {
+    $events = [Collections.Generic.List[string]]::new()
+    $plan = Get-PairedCleanupPlan @($parent,$compiler) $captured.sdkRoot $epoch $false
+    Reject { Invoke-PairedCleanupPlan $plan { throw 'request failed' } { $events.Add('stop') } { $events.Add('absence') } }
+    Require ($events.Count -eq 0)
+}
 $fixture = Join-Path $ResultsDirectory 'output-fixture'
 try
 {
@@ -182,7 +254,7 @@ try
     $actual = Join-Path $fixture 'actual'
     $null = New-Item -ItemType Directory -Path $reference,$actual
     Check 'Dynamic byte equality catches mismatch, missing, extra and empty manifests' {
-        $name = [IO.Path]::Combine('locale with space', 'satellite.resources.dll')
+        $name = [IO.Path]::Combine('bin', 'locale with space', 'satellite.resources.dll')
         foreach ($root in @($reference,$actual))
         {
             $file = Join-Path $root $name
@@ -194,11 +266,82 @@ try
         Require (-not (Compare-PairedTrees $reference $actual).passed)
         Remove-Item -LiteralPath (Join-Path $actual $name)
         Require (-not (Compare-PairedTrees $reference $actual).passed)
-        [IO.File]::WriteAllBytes((Join-Path $actual 'extra.pdb'), [byte[]]@(1))
+        [IO.File]::WriteAllBytes((Join-Path $actual ([IO.Path]::Combine('bin','extra.pdb'))), [byte[]]@(1))
         Require (-not (Compare-PairedTrees $reference $actual).passed)
         Remove-Item -LiteralPath (Join-Path $reference $name)
-        Remove-Item -LiteralPath (Join-Path $actual 'extra.pdb')
+        Remove-Item -LiteralPath (Join-Path $actual ([IO.Path]::Combine('bin','extra.pdb')))
         Require (-not (Compare-PairedTrees $reference $actual).passed)
+    }
+    Check 'Real hidden attributes and dot-generated files are inventoried copied compared and archived in controlled trees' {
+        $product = Join-Path $fixture 'hidden-product'
+        $paths = @(
+            [IO.Path]::Combine('artifacts','obj','Aspire.Hosting','Debug','net10.0','.NETCoreApp,Version=v10.0.AssemblyAttributes.cs'),
+            [IO.Path]::Combine('artifacts','obj','Aspire.Hosting.Integration.Analyzers','Debug','netstandard2.0','.NETStandard,Version=v2.0.AssemblyAttributes.cs'),
+            [IO.Path]::Combine('artifacts','bin','Aspire.Hosting','Debug','net10.0','visible.dll')
+        )
+        $attributes = @{}
+        try
+        {
+            foreach ($path in $paths)
+            {
+                $file = Join-Path $product $path
+                $null = New-Item -ItemType Directory -Path (Split-Path $file) -Force
+                [IO.File]::WriteAllText($file, "fixture bytes: $path")
+                $attributes[$file] = [IO.File]::GetAttributes($file)
+                if ($IsWindows -and $file.EndsWith('.cs'))
+                {
+                    [IO.File]::SetAttributes($file, $attributes[$file] -bor [IO.FileAttributes]::Hidden)
+                    Require (([IO.File]::GetAttributes($file) -band [IO.FileAttributes]::Hidden) -ne 0)
+                }
+            }
+            $null = New-Item -ItemType Directory -Path (Join-Path $product ([IO.Path]::Combine('artifacts','bin','Aspire.Hosting.Integration.Analyzers','Debug'))) -Force
+            $selected = @(Get-PairedOutputFiles $product)
+            Require (($selected.FullName | Sort-Object | ConvertTo-Json -Compress) -ceq
+                (@($paths | ForEach-Object { Join-Path $product $_ }) | Sort-Object | ConvertTo-Json -Compress))
+            $copies = @((Join-Path $fixture 'hidden-reference'),(Join-Path $fixture 'hidden-actual'))
+            foreach ($copy in $copies)
+            {
+                foreach ($file in $selected)
+                {
+                    $relative = [IO.Path]::GetRelativePath((Join-Path $product 'artifacts'), $file.FullName)
+                    $target = Join-Path $copy $relative
+                    $null = New-Item -ItemType Directory -Path (Split-Path $target) -Force
+                    Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+                }
+            }
+            Require ((Compare-PairedTrees $copies[0] $copies[1]).passed)
+            $hiddenRelative = [IO.Path]::GetRelativePath((Join-Path $product 'artifacts'), (Join-Path $product $paths[0]))
+            $changed = [IO.File]::Open((Join-Path $copies[1] $hiddenRelative), [IO.FileMode]::Open, [IO.FileAccess]::Write)
+            try
+            {
+                $changed.SetLength(0)
+                $changed.Write([Text.Encoding]::UTF8.GetBytes('changed hidden bytes'))
+            }
+            finally { $changed.Dispose() }
+            Require (-not (Compare-PairedTrees $copies[0] $copies[1]).passed)
+            $zip = Join-Path $fixture 'controlled-output.zip'
+            [IO.Compression.ZipFile]::CreateFromDirectory($copies[0], $zip)
+            $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+            try
+            {
+                $entry = $archive.Entries | Where-Object { $_.FullName.Replace('\','/') -ceq $hiddenRelative.Replace('\','/') }
+                Require ([bool]$entry)
+                $stream = $entry.Open()
+                $memory = [IO.MemoryStream]::new()
+                try
+                {
+                    $stream.CopyTo($memory)
+                    Require ([Linq.Enumerable]::SequenceEqual[byte](
+                        [IO.File]::ReadAllBytes((Join-Path $product $paths[0])), $memory.ToArray()))
+                }
+                finally { $memory.Dispose(); $stream.Dispose() }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally
+        {
+            foreach ($file in $attributes.Keys) { [IO.File]::SetAttributes($file, $attributes[$file]) }
+        }
     }
     Check 'Shared output selection includes every locale and framework but not obj caches' {
         $root = Join-Path $fixture 'product'

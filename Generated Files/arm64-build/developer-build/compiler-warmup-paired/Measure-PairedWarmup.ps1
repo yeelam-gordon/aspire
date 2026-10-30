@@ -10,6 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Paired-Helpers.ps1')
+. (Join-Path $PSScriptRoot 'Paired-Cleanup.ps1')
 if (-not ($IsWindows -or $IsMacOS)) { throw 'Only native Windows/macOS ARM64 are supported.' }
 if (Test-Path -LiteralPath $ResultsDirectory) { throw 'Refusing overwrite/retry of a paired block.' }
 $null = New-Item -ItemType Directory -Path $ResultsDirectory
@@ -70,6 +71,13 @@ $cleanup = [Collections.Generic.List[object]]::new()
 $comparisons = [Collections.Generic.List[object]]::new()
 $observed = @{}
 $confirmedExited = @{}
+$cleanupByKey = @{}
+$shutdownRequests = @{}
+$stopRequests = @{}
+$nativeBirths = @{}
+$ownedParentProofs = @{}
+$cleanupPlans = [Collections.Generic.List[object]]::new()
+$script:resetInProgress = $false
 $failure = $null
 $cleanupFailed = $false
 $timingPassed = $false
@@ -117,12 +125,15 @@ function Get-PrivateProcesses
     foreach ($process in Get-Process -Name dotnet,VBCSCompiler,MSBuild -ErrorAction SilentlyContinue)
     {
         if (-not $process.Path -or -not (Test-PrivateSdkPath $process.Path $sdkRoot $IsWindows)) { continue }
+        $fields = Get-PairedRuntimeFields $process
+        if (-not $fields.complete) { throw 'Private discovery cannot establish live runtime birth/path.' }
         $start = $process.StartTime.ToUniversalTime()
         if ($start -lt $JobStartUtc.ToUniversalTime()) { throw "Preexisting private process: $($process.Id)" }
         if ($IsWindows)
         {
             $native = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)"
-            if (-not $native -or [math]::Abs(($native.CreationDate.ToUniversalTime() - $start).TotalSeconds) -gt 0.1)
+            if (-not $native -or $native.CreationDate -isnot [DateTime] -or
+                [math]::Abs(($native.CreationDate.ToUniversalTime() - $start).TotalSeconds) -gt 0.1)
             {
                 throw 'Private process birth could not be established.'
             }
@@ -150,9 +161,21 @@ function Get-PrivateProcesses
             }
         }
         $confirmed = Get-Process -Id $process.Id -ErrorAction Stop
-        if (-not (Test-OwnedProcessIdentity $identity $confirmed.Id $confirmed.StartTime.ToUniversalTime().Ticks $confirmed.Path $sdkRoot $IsWindows))
+        $confirmedFields = Get-PairedRuntimeFields $confirmed
+        if (-not $confirmedFields.complete -or
+            -not (Test-OwnedProcessIdentity $identity $confirmedFields.pid $confirmedFields.startTicks $confirmedFields.executablePath $sdkRoot $IsWindows))
         {
             throw 'Private identity changed during native query.'
+        }
+        if (-not $IsWindows)
+        {
+            $key = "$($identity.pid):$($identity.startTicks)"
+            if (-not $nativeBirths.ContainsKey($key))
+            {
+                $nativeState = Get-ExitDiagnostic $identity
+                $null = Get-PairedExitState $identity $confirmedFields $nativeState '' $false $false $sdkRoot $false
+                $nativeBirths[$key] = $nativeState.native.nativeStart
+            }
         }
         $observed["$($identity.pid):$($identity.startTicks)"] = $identity
         $identity
@@ -183,89 +206,6 @@ function Get-ExitDiagnostic($Identity)
     return $diagnostic
 }
 
-function Stop-ExactPrivate($Identity)
-{
-    if ($Identity.startTicks -lt $JobStartUtc.ToUniversalTime().Ticks -or
-        -not (Test-PrivateSdkPath $Identity.executablePath $sdkRoot $IsWindows))
-    {
-        throw 'Refusing identity predating job epoch or outside private SDK.'
-    }
-    $process = Get-Process -Id $Identity.pid -ErrorAction SilentlyContinue
-    $receipt = @{ identity = $Identity; before = Get-ExitDiagnostic $Identity; exitConfirmed = $false }
-    try
-    {
-        if ($process)
-        {
-            if (-not (Test-OwnedProcessIdentity $Identity $process.Id $process.StartTime.ToUniversalTime().Ticks $process.Path $sdkRoot $IsWindows))
-            {
-                throw 'PID reuse/path change; refusing stop and refusing an exit claim.'
-            }
-            if ($Identity.kind -eq 'compiler')
-            {
-                $pipe = Get-PairedPipe $Identity.commandEvidence
-                # Roslyn's supported exact private IPC allows EventPipe to
-                # finalize. Force-killing a traced compiler truncates evidence.
-                $nativeCompiler = Join-Path (Split-Path $config) $(if ($IsWindows) { 'VBCSCompiler.exe' } else { 'VBCSCompiler' })
-                $receipt.graceful = Invoke-PairedCommand @('-shutdown', "-pipename:$pipe") `
-                    (Join-Path $ResultsDirectory "shutdown-$($Identity.pid)-$($Identity.startTicks)-attempt-$($cleanup.Count)") @{} $nativeCompiler
-                $receipt.pipe = $pipe
-                if (-not $process.WaitForExit(60000)) { throw 'Private graceful compiler shutdown timed out.' }
-            }
-            elseif ($Identity.kind -in @('msbuild-helper','launched-command'))
-            {
-                Stop-Process -Id $Identity.pid -Force
-            }
-            else { throw 'Unexpected live private process; refusing to kill unknown work.' }
-            # A non-child Process.WaitForExit can confuse retained Unix process
-            # state with liveness. Require BOTH runtime absence and native ps
-            # absence; a zombie or unresolved query remains a FAILED gate.
-            $receipt.waitForExit = $process.WaitForExit(10000)
-        }
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        do
-        {
-            $remaining = Get-Process -Id $Identity.pid -ErrorAction SilentlyContinue
-            $native = Get-ExitDiagnostic $Identity
-            $nativeAbsent = if ($IsWindows) { -not $native.native } else {
-                Test-PairedAbsence ([bool]$remaining) $native.psExitCode $native.raw
-            }
-            if (-not $remaining -and $nativeAbsent) { $receipt.exitConfirmed = $true; break }
-            if ($remaining -and -not (Test-OwnedProcessIdentity $Identity $remaining.Id $remaining.StartTime.ToUniversalTime().Ticks $remaining.Path $sdkRoot $IsWindows))
-            {
-                throw 'PID reused during absence proof; no exit claim.'
-            }
-            Start-Sleep -Milliseconds 100
-        } while ($timer.Elapsed.TotalSeconds -lt 10)
-        $receipt.after = $native
-        if (-not $receipt.exitConfirmed) { throw 'Owned exit unconfirmed (including possible zombie); raw diagnostics retained.' }
-    }
-    catch
-    {
-        $receipt.error = $_.ToString()
-        $receipt.afterFailure = Get-ExitDiagnostic $Identity
-        throw
-    }
-    finally
-    {
-        $cleanup.Add($receipt)
-        Write-PairedJson @($cleanup.ToArray()) (Join-Path $ResultsDirectory 'cleanup.json')
-    }
-}
-
-function Reset-PrivateProcesses
-{
-    $current = @(Get-PrivateProcesses)
-    $owned = @(Get-PairedPendingIdentities $observed $current $confirmedExited)
-    # Finalize the compiler first, then stop known owned bootstrap/node parents.
-    # Mac zombie/unknown state still fails exact native absence, never passes.
-    foreach ($identity in @($owned | Sort-Object { if ($_.kind -eq 'compiler') { 0 } else { 1 } }))
-    {
-        Stop-ExactPrivate $identity
-        $confirmedExited["$($identity.pid):$($identity.startTicks)"] = $true
-    }
-    if (@(Get-PrivateProcesses).Count) { throw 'Private processes remain after reset.' }
-}
-
 function Invoke-PairedCommand([string[]]$Arguments, [string]$Stem,
     [hashtable]$ExtraEnvironment = @{}, [string]$Executable = $dotnet)
 {
@@ -293,8 +233,9 @@ function Invoke-PairedCommand([string[]]$Arguments, [string]$Stem,
     if (-not $exited)
     {
         $identity = @{ pid = $process.Id; startTicks = $birth; executablePath = $Executable; kind = 'launched-command' }
-        Stop-ExactPrivate $identity
-        Reset-PrivateProcesses
+        Stop-PairedOwnedParent $identity
+        Confirm-PairedPrivateAbsence $identity
+        if (-not $script:resetInProgress) { Reset-PrivateProcesses }
     }
     if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { throw 'Command pipes did not close within bound.' }
     [IO.File]::WriteAllText("$Stem.stdout.log", $stdout.GetAwaiter().GetResult())
@@ -595,7 +536,7 @@ try
                         $relative = [IO.Path]::GetRelativePath((Join-Path $RepositoryRoot 'artifacts'), $file.FullName)
                         $target = Join-Path $outputs $relative
                         $null = New-Item -ItemType Directory -Path (Split-Path $target) -Force
-                        Copy-Item -LiteralPath $file.FullName -Destination $target
+                        Copy-Item -LiteralPath $file.FullName -Destination $target -Force
                         @{ path = $relative; bytes = $file.Length }
                     }
                 )
