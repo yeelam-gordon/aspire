@@ -22,8 +22,17 @@ would be a new known-work calibration, not a retry of a local recording.
   no MSBuild/compiler server/restore or SDK writes locally. Copies existing
   TraceEvent 3.1.28 and its ARM64 native asset into private decoder output.
 - `Invoke-Control.ps1`: **unprofiled only**, no collector option or callback.
-- `Setup-Hosted.ps1`: guarded SDK-only ARM64 subset of the existing P44
-  repository bootstrap, avoiding the product restore/x64-runtime loop.
+- `Bootstrap-Sdk.ps1`: small shared hosted/local SDK-only invocation of the
+  official installer, pinned version and ARM64, **no Runtime argument**. Retains
+  downloaded installer bytes/provenance, exact argv, raw errors and bounded
+  receipt. A fresh absolute target is mandatory; no installed-version skip or
+  overlay. Process-only scratch is kept in the owned evidence directory.
+- `Test-Bootstrap.ps1`: executes the same invocation against a controlled
+  throwing installer to verify actual parameter binding and original-error
+  retention, then checks existing-target and local hosted-setup rejection.
+- `Setup-Hosted.ps1`: still hosted/ref/attempt guarded; uses that same SDK
+  bootstrap function, avoiding product restore and the shared wrapper's
+  swallowed errors. Shared `eng\common` and repository pins are unchanged.
 - `Invoke-HostedCalibration.ps1`: standard installed CPUUsageLow at 100 Hz,
   exact owned live PID/birth/path, one GUID session, bounded start/stop/expand,
   no collision retry, no stopping a session without successful start receipt,
