@@ -1,5 +1,5 @@
 name: Compare ARM64 developer builds
-run-name: Paired ordinary Hosting compiler TieredPGO policy (B-C-C-B)
+run-name: Paired ordinary Hosting default compiler warm-up (A-A)
 
 # Existing registered manual workflow path; no PR/push/schedule trigger.
 # Dispatch remains subject to a separate parent-owned long-session/audit gate.
@@ -10,24 +10,24 @@ permissions:
   contents: read
 
 jobs:
-  paired_pgo:
+  paired_warmup:
     if: >-
       github.repository == 'yeelam-gordon/aspire' &&
-      github.ref == 'refs/heads/perf/arm64-compiler-pgo'
-    name: Paired compiler policy (${{ matrix.runner }})
+      github.ref == 'refs/heads/perf/arm64-compiler-warmup'
+    name: Default compiler warm-up (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Two hosts, not independent arm jobs: all four arms share each host.
+        # Two hosts; both default lifetimes run within each same host.
         runner: [windows-11-vs2026-arm, macos-latest]
     steps:
       - name: Precreate evidence and ownership epoch
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $evidence = Join-Path $PWD 'compiler-pgo-results'
+          $evidence = Join-Path $PWD 'compiler-warmup-results'
           New-Item -ItemType Directory -Path $evidence | Out-Null
           $started = [DateTime]::UtcNow.ToString('O')
           "PAIRED_JOB_START_UTC=$started" >> $env:GITHUB_ENV
@@ -58,15 +58,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $PWD 'product'
-          $evidence = Join-Path $PWD 'compiler-pgo-results'
+          $evidence = Join-Path $PWD 'compiler-warmup-results'
           if (Test-Path (Join-Path $root '.dotnet')) {
             throw 'Private SDK must be fresh for job-epoch ownership.'
           }
           if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
               [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString() -ne 'Arm64') {
-            throw 'Both policy arms require native ARM64 processes and OS.'
+            throw 'Both lifetimes require native ARM64 processes and OS.'
           }
-          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-warmup-paired'))
           . (Join-Path $helper 'Paired-Helpers.ps1')
           $source = (& git -C $root rev-parse HEAD).Trim()
           if (-not (Test-PairedDispatch $env:GITHUB_REPOSITORY $env:GITHUB_REF $env:GITHUB_EVENT_NAME $source)) {
@@ -98,18 +98,18 @@ jobs:
       - name: Pure source fixtures
         shell: pwsh
         run: |
-          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
-          & (Join-Path $helper 'Test-PairedPgo.ps1') -ResultsDirectory (Join-Path $PWD ([IO.Path]::Combine('compiler-pgo-results', 'source-checks')))
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-warmup-paired'))
+          & (Join-Path $helper 'Test-PairedWarmup.ps1') -ResultsDirectory (Join-Path $PWD ([IO.Path]::Combine('compiler-warmup-results', 'source-checks')))
 
       - name: Build offline reader outside measurement
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $PWD 'product'
-          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-warmup-paired'))
           $dotnet = Join-Path (Join-Path $root '.dotnet') $(if ($IsWindows) { 'dotnet.exe' } else { 'dotnet' })
           $readerProject = Join-Path $helper ([IO.Path]::Combine('binlog-reader', 'Reader.csproj'))
-          $evidence = Join-Path $PWD 'compiler-pgo-results'
+          $evidence = Join-Path $PWD 'compiler-warmup-results'
           @{
             executable = $dotnet
             arguments = @('build', $readerProject, '--configuration', 'Debug', '--nologo', '/p:UseSharedCompilation=false', '/nr:false')
@@ -121,26 +121,36 @@ jobs:
             # Only the tiny standalone replay utility uses these flags.
             & $dotnet build $readerProject --configuration Debug --nologo /p:UseSharedCompilation=false /nr:false *> (Join-Path $evidence 'reader-build.log')
             if ($LASTEXITCODE -ne 0) { throw 'Offline reader setup build failed.' }
+            # Reuse P41's pinned offline decoder, never loaded in the product.
+            $library = & (Join-Path $helper 'Get-OfflineDecoder.ps1') -Destination (Join-Path $evidence 'offline-library')
+            $traceProject = Join-Path $helper ([IO.Path]::Combine('trace-reader', 'TraceReader.csproj'))
+            @{
+              executable = $dotnet
+              arguments = @('build', $traceProject, '--configuration', 'Debug', '--nologo', '/p:UseSharedCompilation=false', '/nr:false', "/p:TraceEventDirectory=$library")
+              includedInTiming = $false
+            } | ConvertTo-Json | Set-Content (Join-Path $evidence 'trace-reader-command.json')
+            & $dotnet build $traceProject --configuration Debug --nologo /p:UseSharedCompilation=false /nr:false "/p:TraceEventDirectory=$library" *> (Join-Path $evidence 'trace-reader-build.log')
+            if ($LASTEXITCODE -ne 0) { throw 'Offline trace decoder setup build failed.' }
           }
           finally { Pop-Location }
 
-      - name: One paired block on this host
+      - name: Two default lifetimes then separate diagnostic on this host
         shell: pwsh
         run: |
-          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
-          & (Join-Path $helper 'Measure-PairedPgo.ps1') `
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-warmup-paired'))
+          & (Join-Path $helper 'Measure-PairedWarmup.ps1') `
             -RepositoryRoot (Join-Path $PWD 'product') `
-            -ResultsDirectory (Join-Path $PWD ([IO.Path]::Combine('compiler-pgo-results', 'measurements'))) `
+            -ResultsDirectory (Join-Path $PWD ([IO.Path]::Combine('compiler-warmup-results', 'measurements'))) `
             -JobStartUtc ([DateTime]::Parse($env:PAIRED_JOB_START_UTC).ToUniversalTime()) `
-            -EditCount 8
+            -EditCount 20
 
-      - name: Upload paired policy evidence
+      - name: Upload timing and diagnostic gates separately
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: compiler-pgo-${{ matrix.runner }}
+          name: compiler-warmup-${{ matrix.runner }}
           path: |
-            compiler-pgo-results/
+            compiler-warmup-results/
             product/artifacts/log/
           if-no-files-found: error
           retention-days: 7

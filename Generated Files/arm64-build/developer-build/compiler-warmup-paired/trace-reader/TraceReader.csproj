@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The same offline decoder library as P41, not a target profiler/package. -->
+    <Reference Include="Microsoft.Diagnostics.Tracing.TraceEvent" HintPath="$(TraceEventDirectory)/Microsoft.Diagnostics.Tracing.TraceEvent.dll" />
+    <Reference Include="Microsoft.Diagnostics.FastSerialization" HintPath="$(TraceEventDirectory)/Microsoft.Diagnostics.FastSerialization.dll" />
+  </ItemGroup>
+  <Target Name="RequireOfflineDecoder" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(TraceEventDirectory)/Microsoft.Diagnostics.Tracing.TraceEvent.dll')" Text="Supply the P41 TraceEvent 3.1.28 offline library directory." />
+  </Target>
+</Project>
