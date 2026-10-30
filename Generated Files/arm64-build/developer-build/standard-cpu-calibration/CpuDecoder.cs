@@ -140,6 +140,7 @@ internal static class CpuDecoder
             long capHits = 0, samplesWithUnresolvedFrames = 0, fullyNamedStacks = 0, leafModuleKnown = 0, leafMethodKnown = 0;
             var maximumWalkedDepth = 0;
             var leafCounts = new Dictionary<string, long>();
+            var callerContexts = new Dictionary<string, long>();
             var modules = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             foreach (var data in log.Events.FilterByTime(phase.StartUtc.ToLocalTime(), phase.EndUtc.ToLocalTime()))
             {
@@ -151,6 +152,7 @@ internal static class CpuDecoder
                 }
                 samples++;
                 var frames = new List<object>();
+                var contextFrames = new List<string>();
                 var known = false;
                 var stack = data.CallStack();
                 var leafModule = stack?.CodeAddress.ModuleName ?? "";
@@ -193,7 +195,13 @@ internal static class CpuDecoder
                         method.Contains(identity.KnownMethod, StringComparison.Ordinal) &&
                         module.Contains(identity.Assembly, StringComparison.OrdinalIgnoreCase);
                     frames.Add(new { module, method, address = $"0x{code.Address:X}" });
+                    if (contextFrames.Count < 16)
+                    {
+                        contextFrames.Add($"{module}!{(string.IsNullOrEmpty(method) ? "<unresolved>" : method)}");
+                    }
                 }
+                var contextKey = string.Join(" <= ", contextFrames);
+                callerContexts[contextKey] = callerContexts.GetValueOrDefault(contextKey) + 1;
                 var capped = stack is not null;
                 if (capped)
                 {
@@ -236,7 +244,10 @@ internal static class CpuDecoder
             {
                 phase.Name, phase.StartUtc, phase.EndUtc, phase.CpuSeconds, samples, withStacks, knownMethodSamples,
                 unresolvedFrames, modules, capHits, maximumWalkedDepth, samplesWithUnresolvedFrames, fullyNamedStacks,
-                leafModuleKnown, leafMethodKnown, leafCounts
+                leafModuleKnown, leafMethodKnown, leafCounts,
+                topCallerContexts = callerContexts.OrderByDescending(pair => pair.Value).Take(40)
+                    .Select(pair => new { context = pair.Key, samples = pair.Value }).ToArray(),
+                callerContextLimit = "First 16 frames for summaries; full walk coverage/caps counted separately"
             });
         }
         Save(Path.Combine(output, "owned-module-identities.json"), touchedModules.Values.Select(file => new
@@ -348,12 +359,13 @@ internal static class CpuDecoder
             Options = SymbolReaderOptions.NoNGenSymbolCreation
         };
         var results = new List<object>();
-        foreach (var module in modules.Values.Where(m => m.Name is "coreclr" or "system.private.corelib"))
+        foreach (var module in modules.Values.Where(m => m.Name is "coreclr" or "system.private.corelib" or
+            "clrjit" or "microsoft.codeanalysis" or "microsoft.codeanalysis.csharp"))
         {
             // Only public runtime binaries from this exact private SDK prefix
             // may be mapped to local images. Never search by filename alone or
             // send KnownWork/private PDB identities to a public symbol server.
-            const string remotePrefix = @"c:\a\aspire\aspire\instrumentation\.dotnet\";
+            var remotePrefix = (identity.SdkRoot ?? @"c:\a\aspire\aspire\instrumentation\.dotnet").TrimEnd('\\') + "\\";
             if (!module.FilePath.StartsWith(remotePrefix, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException("Selected runtime module is outside recorded private SDK.");
@@ -526,7 +538,10 @@ internal static class CpuDecoder
         File.WriteAllText(path, JsonSerializer.Serialize(value, s_json));
     }
 
-    private sealed record Identity(int Pid, string ImagePath, string CommandContains, DateTime? BirthUtc, string Assembly, string KnownMethod);
+    private sealed record Identity(int Pid, string ImagePath, string CommandContains, DateTime? BirthUtc, string Assembly, string KnownMethod)
+    {
+        public string? SdkRoot { get; init; }
+    }
     private sealed record Phase(string Name, DateTime StartUtc, DateTime EndUtc, double CpuSeconds);
     private sealed record SymbolSample(string Phase, DateTime Timestamp, List<CodeAddressIndex> Addresses, bool Capped);
 }

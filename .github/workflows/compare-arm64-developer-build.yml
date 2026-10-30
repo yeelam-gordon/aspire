@@ -1,76 +1,65 @@
 name: Compare ARM64 developer builds
-run-name: P48 isolated standard CPU known-work calibration (not an Aspire build)
-
-# Reuse registered manual workflow ID 400645444 on THIS branch only.
-# LOCAL PREPARATION: parent has not authorized push or dispatch.
-# A dedicated ephemeral runner addresses shared-DevBox acquisition risk; PID
-# selection alone is not a claim that the collector backend is per-process.
+run-name: P49 qualified mature common Csc CPU diagnostic
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  standard_cpu_calibration:
+  mature_cpu:
     if: >-
       github.repository == 'yeelam-gordon/aspire' &&
-      github.ref == 'refs/heads/perf/arm64-standard-cpu-calibration' &&
-      github.event_name == 'workflow_dispatch' &&
-      github.run_attempt == 1
-    name: Owned known-work CPU calibration (Windows ARM64 only)
+      github.ref == 'refs/heads/perf/arm64-mature-cpu-profile' &&
+      github.event_name == 'workflow_dispatch' && github.run_attempt == 1
     runs-on: windows-11-vs2026-arm
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      # Existing P44 checkout/upload pins unchanged.
       - name: Checkout owned instrumentation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: instrumentation
           persist-credentials: false
-
-      - name: Native SDK-only setup and public API fixtures
+      - name: Checkout fixed ordinary product
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 06efc928e31486923754398007f4f78003e04ee3
+          path: product
+          persist-credentials: false
+      - name: Native private SDK and offline tools
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $PWD 'instrumentation'
-          $helper = Join-Path $root 'Generated Files\arm64-build\developer-build\standard-cpu-calibration'
-          $evidence = Join-Path $PWD 'standard-cpu-results\evidence'
+          $helper = Join-Path $root 'Generated Files\arm64-build\developer-build\standard-cpu-calibration\mature-csc'
+          $evidence = Join-Path $PWD 'mature-cpu-results\evidence'
           try {
-            & (Join-Path $helper 'Setup-Hosted.ps1') -RepositoryRoot $root -Evidence $evidence
+            & (Join-Path $helper 'Setup-Hosted.ps1') -InstrumentationRoot $root -RepositoryRoot (Join-Path $PWD 'product') -Evidence $evidence
           }
           catch {
-            if (Test-Path -LiteralPath $evidence) {
-              $_ | Out-String | Set-Content (Join-Path $evidence 'setup-failure.txt')
-            }
+            if (Test-Path $evidence) { $_ | Out-String | Set-Content (Join-Path $evidence 'setup-failure.txt') }
             throw
           }
-
-      - name: One owned standard low-rate session only
+      - name: One fixed normal compiler lifetime and one qualified CPU build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $PWD 'instrumentation'
-          $helper = Join-Path $root 'Generated Files\arm64-build\developer-build\standard-cpu-calibration'
-          $evidence = Join-Path $PWD 'standard-cpu-results\evidence'
+          $helper = Join-Path $root 'Generated Files\arm64-build\developer-build\standard-cpu-calibration\mature-csc'
+          $evidence = Join-Path $PWD 'mature-cpu-results\evidence'
           try {
-            & (Join-Path $helper 'Invoke-HostedCalibration.ps1') `
-              -Sdk (Join-Path $root '.dotnet') `
-              -Binaries (Join-Path $evidence 'tools') `
-              -Output (Join-Path $evidence 'calibration')
+            & (Join-Path $helper 'Invoke-HostedProfile.ps1') `
+              -RepositoryRoot (Join-Path $PWD 'product') -SdkRoot (Join-Path $PWD 'product\.dotnet') `
+              -ResultsDirectory (Join-Path $evidence 'measurements') -ToolsDirectory (Join-Path $evidence 'tools')
           }
           catch {
-            $_ | Out-String | Set-Content (Join-Path $evidence 'calibration-failure.txt')
+            $_ | Out-String | Set-Content (Join-Path $evidence 'profile-failure.txt')
             throw
           }
-
-      - name: Retain owned known-work evidence even on rejection
+      - name: Retain controlled raw diagnostics including failures
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: standard-cpu-calibration-windows-arm64
-          # Only controlled new results; never checkout/.git/SDK/home.
-          path: standard-cpu-results/evidence/
+          name: mature-cpu-windows-arm64
+          path: mature-cpu-results/evidence/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

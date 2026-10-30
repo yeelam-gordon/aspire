@@ -1,0 +1,16 @@
+{
+  "question": "Observed mature common Csc CPU execution: analyzer-owned code, compiler work in analyzer caller contexts, runtime GC/JIT and unknown work.",
+  "protocol": "One default compiler lifetime; cold/noop, exactly 20 fixed comment edits, plain control, same bytes/mtime-only target. Not adaptive steady-state or throughput.",
+  "baselineAttribution": "Exclusive observed leaf module counts and inclusive caller contexts. No interpretation of inclusive frame occurrences as exclusive CPU time.",
+  "methodAttribution": "Only actual resolved CLR method identities or exactly matching native/R2R PDB mappings. Roslyn native NI PDB availability is not presumed.",
+  "missingRoslynNativePdb": "Retain module-level compiler buckets and unknown method names; analyzer ancestors may qualify observed context, not exact request causality. Do not invent binding method names or run huge PDB generation.",
+  "unresolved": "Keep all unknown samples in denominators. If unknown coverage obscures the named question, stop or coarsen conclusions, not retroactively change the gate.",
+  "quality": "Finalized provided ETL covers declared command/Csc window; documented EventsLost/BuffersLost zero; strict decoding; actual owned CPU events and all-sample cap/stack/leaf coverage. Vendor/upstream drop and unwind completeness remain unavailable, not zero.",
+  "cpuSemantics": "Private server CPU between command endpoints and samples in binlog Csc windows may contain background/GC/JIT; not request-exclusive.",
+  "forbiddenClaims": [
+    "Observed sample percentage is potential build wall gain",
+    "Every native/compiler method or callback is covered",
+    "Loss-free at every vendor layer",
+    "Old cold Windows penalty or platform causality"
+  ]
+}
