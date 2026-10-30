@@ -108,6 +108,27 @@ Check 'CPU endpoint rejection is explicit, never a zero fallback' {
     Reject { Assert-PairedCpuValues ([double]::NaN) 0 0 }
     Reject { Assert-PairedCpuValues -1 0 -1 }
 }
+Check 'Retained warm CPU identity selection does not rediscover and preserves singleton shape' {
+    $tokens = $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot 'Measure-PairedWarmup.ps1'), [ref]$tokens, [ref]$errors)
+    Require ($errors.Count -eq 0)
+    $assignments = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$current' -and $node.Right.Extent.Text -match '\$server'
+    }, $true))
+    Require ($assignments.Count -eq 1)
+    # Execute the actual selection expression with both JSON-replayed and
+    # in-memory identities. Native discovery must never run for a retained PID.
+    $select = [scriptblock]::Create("param(`$server)`nfunction Get-PrivateProcesses { throw 'Unexpected rediscovery' }`n$($assignments[0].Extent.Text)`nreturn ,`$current")
+    foreach ($identity in @(@{ pid = 41; startTicks = 123L }, [pscustomobject]@{ pid = 42; startTicks = 456L }))
+    {
+        $selected = & $select $identity
+        Require ($selected.Count -eq 1 -and $selected[0].pid -eq $identity.pid -and
+            $selected[0].startTicks -eq $identity.startTicks)
+    }
+}
 Check 'Typed ARM64 Mach-O dylib is not an executable and universal policy stays strict' {
     $bytes = [byte[]]::new(32)
     [BitConverter]::GetBytes([uint32]0xFEEDFACFul).CopyTo($bytes, 0)

@@ -507,7 +507,14 @@ try
             {
                 try
                 {
-                    $current = @(Get-PrivateProcesses | Where-Object kind -EQ 'compiler')
+                    # The retained warm identity is already established. Read
+                    # it directly, then let Get-PairedProof revalidate native
+                    # discovery below; avoid a platform-dependent CIM/ps query
+                    # extending every warm CPU endpoint. Cold still needs its
+                    # one actual discovery, with the recorded endpoint tail.
+                    $current = @(if ($server) { $server } else {
+                        Get-PrivateProcesses | Where-Object kind -EQ 'compiler'
+                    })
                     if ($current.Count -ne 1) { throw 'Actual compiler CPU coverage unavailable.' }
                     $cpu.end = Read-PairedCpu $current[0]
                     if ($server -and ($server.pid -ne $current[0].pid -or $server.startTicks -ne $current[0].startTicks))
