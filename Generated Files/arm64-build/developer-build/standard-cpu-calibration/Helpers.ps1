@@ -108,13 +108,28 @@ function Complete-CpuProcess($Owned, [int]$TimeoutSeconds)
 {
     $exited = $Owned.process.WaitForExit($TimeoutSeconds * 1000)
     if (-not $exited) { Stop-ExactCpuProcess $Owned }
-    $Owned.stdout.GetAwaiter().GetResult() | Set-Content "$($Owned.prefix).stdout.log"
-    $Owned.stderr.GetAwaiter().GetResult() | Set-Content "$($Owned.prefix).stderr.log"
+    $outputComplete = $true
+    foreach ($stream in @('stdout', 'stderr'))
+    {
+        try
+        {
+            # A spawned broker can inherit a pipe even after its client exits.
+            # Do not let finalization hang forever while draining that pipe.
+            $Owned.$stream.WaitAsync([TimeSpan]::FromSeconds(5)).GetAwaiter().GetResult() |
+                Set-Content "$($Owned.prefix).$stream.log"
+        }
+        catch
+        {
+            $outputComplete = $false
+            $_.ToString() | Set-Content "$($Owned.prefix).$stream.log"
+        }
+    }
     $receipt = [ordered]@{
         pid = $Owned.pid; birthTicks = $Owned.birthTicks; executable = $Owned.executable
         arguments = $Owned.arguments; startedUtc = $Owned.startedUtc.ToString('O')
         endedUtc = [DateTime]::UtcNow.ToString('O'); timeoutSeconds = $TimeoutSeconds
-        timedOut = -not $exited; exitCode = $Owned.process.ExitCode
+        timedOut = -not $exited -or -not $outputComplete
+        outputComplete = $outputComplete; exitCode = $Owned.process.ExitCode
     }
     Write-CpuJson $receipt "$($Owned.prefix).receipt.json"
     return $receipt
