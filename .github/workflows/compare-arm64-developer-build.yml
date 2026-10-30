@@ -31,12 +31,17 @@ jobs:
           $root = Join-Path $PWD 'instrumentation'
           $helper = Join-Path $root 'Generated Files\arm64-build\developer-build\standard-cpu-calibration\mature-csc'
           $evidence = Join-Path $PWD 'mature-cpu-results\evidence'
+          . (Join-Path $helper 'Failure.ps1')
           try {
             & (Join-Path $helper 'Setup-Hosted.ps1') -InstrumentationRoot $root -RepositoryRoot (Join-Path $PWD 'product') -Evidence $evidence
           }
           catch {
-            if (Test-Path $evidence) { $_ | Out-String | Set-Content (Join-Path $evidence 'setup-failure.txt') }
-            throw
+            $original = $_
+            try {
+              $null = Write-MatureFailure $original (Join-Path $evidence 'entry-errors') 'hosted-setup' 'primary' @((Join-Path $evidence 'sdk-bootstrap\installer.receipt.json'))
+            }
+            catch { [Console]::Error.WriteLine("Additional setup reporting failure: $($_.Exception)") }
+            throw $original
           }
       - name: One fixed normal compiler lifetime and one qualified CPU build
         shell: pwsh
@@ -45,21 +50,47 @@ jobs:
           $root = Join-Path $PWD 'instrumentation'
           $helper = Join-Path $root 'Generated Files\arm64-build\developer-build\standard-cpu-calibration\mature-csc'
           $evidence = Join-Path $PWD 'mature-cpu-results\evidence'
+          . (Join-Path $helper 'Failure.ps1')
           try {
             & (Join-Path $helper 'Invoke-HostedProfile.ps1') `
               -RepositoryRoot (Join-Path $PWD 'product') -SdkRoot (Join-Path $PWD 'product\.dotnet') `
               -ResultsDirectory (Join-Path $evidence 'measurements') -ToolsDirectory (Join-Path $evidence 'tools')
           }
           catch {
-            $_ | Out-String | Set-Content (Join-Path $evidence 'profile-failure.txt')
-            throw
+            $original = $_
+            try {
+              $null = Write-MatureFailure $original (Join-Path $evidence 'entry-errors') 'hosted-profile-entry' 'entrypoint' @((Join-Path $evidence 'measurements\final-state.json'))
+            }
+            catch { [Console]::Error.WriteLine("Additional profile reporting failure: $($_.Exception)") }
+            throw $original
           }
-      - name: Retain controlled raw diagnostics including failures
+      - name: Stage closed diagnostics and explicitly finalized raw evidence
+        id: stage
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $helper = Join-Path $PWD 'instrumentation\Generated Files\arm64-build\developer-build\standard-cpu-calibration\mature-csc'
+          & (Join-Path $helper 'Stage-Retention.ps1') `
+            -EvidenceRoot (Join-Path $PWD 'mature-cpu-results\evidence') `
+            -StageRoot (Join-Path $PWD 'mature-cpu-results\retained')
+      # Metadata is a separate finalized artifact BEFORE optional raw upload.
+      # A locked/failed collector blob cannot discard the already-closed cause.
+      - name: Retain independent closed metadata first
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mature-cpu-windows-arm64
-          path: mature-cpu-results/evidence/
+          name: mature-cpu-metadata-windows-arm64
+          path: mature-cpu-results/retained/metadata/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain only staged closed raw archives and manifested outputs
+        if: always() && steps.stage.outputs.raw_files_available == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mature-cpu-raw-windows-arm64
+          path: mature-cpu-results/retained/raw/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

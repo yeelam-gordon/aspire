@@ -52,3 +52,31 @@ or broad skip rule is needed; no known WSL namespace rerun.
 
 Final local proof, source freeze and remaining runner-only uncertainties:
 MAIN `developer-build\mature-cpu-profile\readiness\REPORT.md/json`.
+
+## Failure-safe retention repair
+
+The original failed run's primary/session outcome was not recoverable:
+upload of broad evidence traversed a protected scratch lock. Do not infer
+timeout, permission or session identity from that missing data.
+
+`Failure.ps1` immediately prints and atomically flushes the original
+ErrorRecord, phase, inner causes, invocation/stack and receipt paths before
+cleanup. Secondary cleanup/restoration/reporting errors do not replace it.
+The protocol rethrows the original record instead of a generic final message.
+Normal timed/quality/collector/CPU commands are unchanged.
+
+`Stage-Retention.ps1`/`Retention.ps1` create closed copied upload roots:
+metadata first as an independent always-upload artifact, then optional safe
+raw. Scratch/cache/work trees are pruned before traversal. Raw recording
+requires exact successful owned start/stop receipts and its explicit output;
+a filename or unfinalized blob cannot qualify. Bin/obj outputs are copied only
+from their closed manifest, including hidden generated files. Missing raw or
+copy failure is explicit metadata and a failed stage, never silent success.
+
+`Test-Retention.ps1` uses the real production reporter/stager with a held
+FileShare.None scratch lock, original/inner plus secondary errors, actual ZIP
+creation while the lock remains held, exact metadata/119-output byte checks
+and negative unfinalized/copy-failure cases. No collector runs.
+`Test-RetentionInvariance.ps1` verifies exact unchanged functions/files and
+build/CPU/collector/cleanup call sequence against d3f2f2ba5a; the completed
+24-case workload proof is reused rather than rerun.
