@@ -102,6 +102,10 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
             $state=Get-Content -LiteralPath $sessionPath -Raw|ConvertFrom-Json
             $guid=[Guid]::Empty
             $archive=Join-Path $capture 'mature-csc.diagsession'
+            # Keep full executable argv evidence, including a script-host prefix
+            # in the real fake-CLI proof. Production VSDiagnostics uses index0.
+            $startIndex=$state.startReceipt.commandIndex
+            $stopIndex=$state.stopReceipt.commandIndex
             $owned=$state.started -and $state.startReceipt.ready -and $state.startReceipt.monitorAliveAtReady -and
                 $state.startReceipt.sessionId -ceq $state.sessionId -and
                 $state.startReceipt.targetIdentity.pid -eq $state.identity.pid -and
@@ -109,15 +113,20 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
                 $state.startReceipt.targetIdentity.executablePath -ceq $state.identity.executablePath -and
                 $state.stopAttempted -and $state.stopAcknowledged -and [Guid]::TryParse($state.sessionId,[ref]$guid) -and
                 $state.stopReceipt.exitCode -eq 0 -and -not$state.stopReceipt.timedOut -and $state.stopReceipt.outputComplete -and
-                $state.startReceipt.arguments[0] -ceq 'start' -and $state.startReceipt.arguments[1] -ceq $state.sessionId -and
+                $null -ne $startIndex -and $startIndex -ge 0 -and $startIndex+1 -lt $state.startReceipt.arguments.Count -and
+                $state.startReceipt.arguments[$startIndex] -ceq 'start' -and $state.startReceipt.arguments[$startIndex+1] -ceq $state.sessionId -and
                 $state.startReceipt.arguments -ccontains "/attach:$($state.identity.pid)" -and
                 $state.startReceipt.arguments -ccontains '/monitor' -and
-                $state.stopReceipt.arguments[0] -ceq 'stop' -and $state.stopReceipt.arguments[1] -ceq $state.sessionId -and
+                $null -ne $stopIndex -and $stopIndex -ge 0 -and $stopIndex+1 -lt $state.stopReceipt.arguments.Count -and
+                $state.stopReceipt.arguments[$stopIndex] -ceq 'stop' -and $state.stopReceipt.arguments[$stopIndex+1] -ceq $state.sessionId -and
                 $state.stopReceipt.arguments -ccontains "/output:$archive" -and
                 [IO.Path]::GetFullPath($state.output) -ceq $archive -and
                 $state.identity.pid -gt 0 -and $state.identity.startTicks -gt 0
             if(-not$owned){throw 'Raw archive has no valid owned successful start/stop/finalized-output proof.'}
-            if(-not(Test-MatureStatusText (Get-Content (Join-Path $capture 'start.stdout-prefix.log') -Raw) $state.sessionId 'Running') -or
+            # The validated ACK is captured in caller-owned readiness state
+            # before its separate prefix file is written. Prefix persistence
+            # failure must not discard an otherwise acknowledged owned export.
+            if(-not(Test-MatureStatusText $state.startReceipt.ackText $state.sessionId 'Running') -or
                 -not(Test-MatureStatusText (Get-Content (Join-Path $capture 'stop.stdout.log') -Raw) $state.sessionId 'Stopped'))
             {throw 'Exact owned Running/Stopped transcript ACK missing.'}
             if(-not(Test-Path -LiteralPath $archive) -or (Get-Item -LiteralPath $archive -Force).Length -eq 0){throw 'Finalized raw archive missing/empty.'}
@@ -147,7 +156,7 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
             $monitorComplete=$monitor.pid -eq $state.startReceipt.pid -and $monitor.birthTicks -eq $state.startReceipt.birthTicks -and
                 $monitor.executable -ceq $state.startReceipt.executable -and
                 ($monitor.arguments -join "`n") -ceq ($state.startReceipt.arguments -join "`n") -and
-                $monitor.exitCode -eq 0 -and -not$monitor.timedOut -and $monitor.outputComplete
+                $monitor.exitCode -eq 0 -and -not$monitor.timedOut -and $monitor.outputComplete -and $monitor.captureComplete
             $protocolPath=Join-Path $EvidenceRoot 'measurements\final-state.json'
             $gatePath=Join-Path $capture 'qualified-gate.json'
             if($monitorComplete -and (Test-Path $protocolPath) -and (Test-Path $gatePath))

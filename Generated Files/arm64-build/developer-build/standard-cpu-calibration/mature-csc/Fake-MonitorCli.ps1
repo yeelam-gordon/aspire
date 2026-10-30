@@ -11,9 +11,16 @@ if($Command -ceq 'hold')
 }
 if($Command -ceq 'stop')
 {
+    [IO.File]::AppendAllText((Join-Path $Root 'stop-invocations.jsonl'),("{0}`n" -f $SessionId))
     if($Mode -ceq 'stopTimeout'){Start-Sleep -Seconds 25;exit 8}
     $output=@($Options|Where-Object {$_ -clike '/output:*'})[0].Substring(8)
-    [IO.File]::WriteAllText($output,'OWNED SYNTHETIC archive, not profiler data.')
+    $zip=[IO.Compression.ZipFile]::Open($output,[IO.Compression.ZipArchiveMode]::Create)
+    try
+    {
+        $writer=[IO.StreamWriter]::new($zip.CreateEntry('SYNTHETIC-NOT-PROFILER-DATA.txt').Open())
+        try{$writer.Write('Owned fake CLI export only.')}finally{$writer.Dispose()}
+    }
+    finally{$zip.Dispose()}
     [IO.File]::WriteAllText((Join-Path $Root 'stop.signal'),'stop')
     $id=if($Mode -ceq 'stopWrong'){[Guid]::NewGuid().ToString()}else{$SessionId}
     [Console]::WriteLine("Session ${id}: {$id}")

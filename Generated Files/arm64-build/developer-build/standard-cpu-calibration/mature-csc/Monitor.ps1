@@ -61,7 +61,7 @@ function Begin-MatureMonitor($State,[string[]]$Arguments)
     # unbuffered private file also exposes startup errors before readiness.
     $monitor.stderr=$monitor.process.StandardError.BaseStream.CopyToAsync($monitor.stderrFile)
     $State.startReceipt=@{ready=$false;sessionId=$State.sessionId;pid=$monitor.pid;birthTicks=$monitor.birthTicks
-        executable=$monitor.executable;arguments=$monitor.arguments;startedUtc=$monitor.startedUtc.ToString('O')}
+        executable=$monitor.executable;arguments=$monitor.arguments;commandIndex=$index;startedUtc=$monitor.startedUtc.ToString('O')}
     Write-CpuJson $State.startReceipt "$($monitor.prefix).receipt.json"
 }
 
@@ -84,22 +84,27 @@ function Wait-MatureMonitorReady($State,[double]$TimeoutSeconds)
                 if($count -eq 0){throw 'Monitor stdout ended before live Running readiness.'}
                 $null=$monitor.prefixText.Append($monitor.buffer,0,$count)
                 $prefix=$monitor.prefixText.ToString()
-                [IO.File]::WriteAllText("$($monitor.prefix).stdout-prefix.log",$prefix)
-                if(Test-MatureStatusText $prefix $State.sessionId 'Running')
+                $ready=Test-MatureStatusText $prefix $State.sessionId 'Running'
+                if($ready)
                 {
                     Assert-ExactCpuProcess $monitor
                     Assert-MatureMonitorTarget $State.identity
-                    if(-not[string]::IsNullOrWhiteSpace((Read-MatureStderr $monitor))){throw 'Standard monitor stderr at readiness.'}
-                    # State is caller-owned BEFORE this function. Preserve stop
-                    # authority even if a subsequent receipt write/work throws.
+                    # The validated ACK is already in memory. Establish the
+                    # stop obligation before ANY recording I/O can fail.
                     $State.started=$true
                     $State.startReceipt.ready=$true
                     $State.startReceipt.monitorAliveAtReady=$true
                     $State.startReceipt.targetIdentity=$State.identity
                     $State.startReceipt.readyUtc=[DateTime]::UtcNow.ToString('O')
+                    $State.startReceipt.ackText=$prefix
                     # No outstanding incremental stdout read remains. Only now
                     # hand the rest of the same stream to ReadToEndAsync.
                     $monitor.stdout=$monitor.process.StandardOutput.ReadToEndAsync()
+                }
+                if(-not[string]::IsNullOrWhiteSpace((Read-MatureStderr $monitor))){throw 'Standard monitor stderr at readiness.'}
+                [IO.File]::WriteAllText("$($monitor.prefix).stdout-prefix.log",$prefix)
+                if($ready)
+                {
                     Write-CpuJson $State.startReceipt "$($monitor.prefix).receipt.json"
                     return
                 }
@@ -122,38 +127,87 @@ function Wait-MatureMonitorReady($State,[double]$TimeoutSeconds)
 function Complete-MatureMonitor($State,[int]$ExitTimeoutSeconds,[int]$DrainTimeoutSeconds)
 {
     $monitor=$State.monitor
-    $exited=$monitor.process.WaitForExit($ExitTimeoutSeconds*1000)
-    if(-not$exited){Stop-ExactCpuProcess $monitor}
-    $complete=$true
+    $original=$null
+    $persistenceErrors=[Collections.Generic.List[object]]::new()
+    $cleanupErrors=[Collections.Generic.List[object]]::new()
     $drainErrors=[Collections.Generic.List[object]]::new()
-    $tail=''
+    $receipt=@{pid=$monitor.pid;birthTicks=$monitor.birthTicks;executable=$monitor.executable;arguments=$monitor.arguments
+        startedUtc=$monitor.startedUtc.ToString('O');exitTimeoutSeconds=$ExitTimeoutSeconds;drainTimeoutSeconds=$DrainTimeoutSeconds
+        exitObserved=$false;exitCode=$null;timedOut=$null;outputComplete=$false
+        persistenceComplete=$false;resourcesClosed=$false;captureComplete=$false}
+    $State.monitorReceipt=$receipt
     try
     {
-        if($null -ne $monitor.pendingRead)
+        $exited=$monitor.process.WaitForExit($ExitTimeoutSeconds*1000)
+        $receipt.timedOut=-not$exited
+        if(-not$exited){Stop-ExactCpuProcess $monitor}
+        $receipt.exitObserved=$monitor.process.HasExited
+        if($receipt.exitObserved){$receipt.exitCode=$monitor.process.ExitCode}
+        $complete=$true
+        $tail=''
+        try
         {
-            $count=$monitor.pendingRead.WaitAsync([TimeSpan]::FromSeconds($DrainTimeoutSeconds)).GetAwaiter().GetResult()
-            $null=$monitor.prefixText.Append($monitor.buffer,0,$count)
-            $monitor.pendingRead=$null
+            if($null -ne $monitor.pendingRead)
+            {
+                $count=$monitor.pendingRead.WaitAsync([TimeSpan]::FromSeconds($DrainTimeoutSeconds)).GetAwaiter().GetResult()
+                $null=$monitor.prefixText.Append($monitor.buffer,0,$count)
+                $monitor.pendingRead=$null
+            }
+            if($null -eq $monitor.stdout){$monitor.stdout=$monitor.process.StandardOutput.ReadToEndAsync()}
+            $tail=$monitor.stdout.WaitAsync([TimeSpan]::FromSeconds($DrainTimeoutSeconds)).GetAwaiter().GetResult()
         }
-        if($null -eq $monitor.stdout){$monitor.stdout=$monitor.process.StandardOutput.ReadToEndAsync()}
-        $tail=$monitor.stdout.WaitAsync([TimeSpan]::FromSeconds($DrainTimeoutSeconds)).GetAwaiter().GetResult()
+        catch{$complete=$false;$drainErrors.Add(@{stream='stdout';error=$_.ToString()})}
+        try{$monitor.stderr.WaitAsync([TimeSpan]::FromSeconds($DrainTimeoutSeconds)).GetAwaiter().GetResult();$monitor.stderrFile.Flush($true)}
+        catch{$complete=$false;$drainErrors.Add(@{stream='stderr';error=$_.ToString()})}
+        # Observations are authoritative in caller memory BEFORE recording I/O.
+        # A failed log write must not erase a successful exit/drain observation.
+        $receipt.outputComplete=$complete
+        $receipt.drainErrors=@($drainErrors.ToArray())
+        try{[IO.File]::WriteAllText("$($monitor.prefix).stdout.log",$monitor.prefixText.ToString()+$tail)}
+        catch
+        {
+            $original=$_
+            $persistenceErrors.Add(@{phase='monitor-stdout';error=$_.ToString();exception=$_.Exception.ToString();stack=$_.ScriptStackTrace})
+            [Console]::Error.WriteLine("P49 monitor stdout persistence failure: $($_.Exception)")
+            [Console]::Error.WriteLine($_.ScriptStackTrace)
+        }
     }
-    catch{$complete=$false;$drainErrors.Add(@{stream='stdout';error=$_.ToString()})}
-    [IO.File]::WriteAllText("$($monitor.prefix).stdout.log",$monitor.prefixText.ToString()+$tail)
-    try{$monitor.stderr.WaitAsync([TimeSpan]::FromSeconds($DrainTimeoutSeconds)).GetAwaiter().GetResult();$monitor.stderrFile.Flush($true)}
-    catch{$complete=$false;$drainErrors.Add(@{stream='stderr';error=$_.ToString()})}
+    catch
+    {
+        if($null -eq $original){$original=$_}
+        else{$cleanupErrors.Add(@{resource='completion';error=$_.ToString();exception=$_.Exception.ToString();stack=$_.ScriptStackTrace})}
+    }
     finally
     {
-        $monitor.stderrFile.Dispose()
-        $monitor.process.StandardOutput.Dispose()
-        $monitor.process.StandardError.Dispose()
+        foreach($resource in @(@{name='stderr-file';value=$monitor.stderrFile},
+            @{name='stdout-reader';value=$monitor.process.StandardOutput},@{name='stderr-reader';value=$monitor.process.StandardError}))
+        {
+            if($null -eq $resource.value){continue}
+            try{$resource.value.Dispose()}
+            catch
+            {
+                $cleanupErrors.Add(@{resource=$resource.name;error=$_.ToString();exception=$_.Exception.ToString();stack=$_.ScriptStackTrace})
+                [Console]::Error.WriteLine("P49 secondary monitor stream-disposal failure ($($resource.name)): $($_.Exception)")
+                if($null -eq $original){$original=$_}
+            }
+        }
     }
-    $receipt=@{pid=$monitor.pid;birthTicks=$monitor.birthTicks;executable=$monitor.executable;arguments=$monitor.arguments
-        startedUtc=$monitor.startedUtc.ToString('O');endedUtc=[DateTime]::UtcNow.ToString('O')
-        exitTimeoutSeconds=$ExitTimeoutSeconds;drainTimeoutSeconds=$DrainTimeoutSeconds
-        timedOut=-not$exited;outputComplete=$complete;exitCode=$monitor.process.ExitCode;drainErrors=@($drainErrors.ToArray())}
-    $State.monitorReceipt=$receipt
-    Write-CpuJson $receipt (Join-Path $State.directory 'monitor-final.receipt.json')
+    $receipt.endedUtc=[DateTime]::UtcNow.ToString('O')
+    $receipt.resourcesClosed=$cleanupErrors.Count -eq 0
+    $receipt.cleanupErrors=@($cleanupErrors.ToArray())
+    $receipt.persistenceErrors=@($persistenceErrors.ToArray())
+    $receipt.persistenceComplete=$persistenceErrors.Count -eq 0
+    $receipt.captureComplete=$receipt.outputComplete -and $receipt.resourcesClosed -and $receipt.persistenceComplete
+    try{Write-CpuJson $receipt (Join-Path $State.directory 'monitor-final.receipt.json')}
+    catch
+    {
+        $persistenceErrors.Add(@{phase='monitor-receipt';error=$_.ToString();exception=$_.Exception.ToString();stack=$_.ScriptStackTrace})
+        $receipt.persistenceErrors=@($persistenceErrors.ToArray())
+        $receipt.persistenceComplete=$false;$receipt.captureComplete=$false
+        [Console]::Error.WriteLine("P49 secondary monitor receipt persistence failure: $($_.Exception)")
+        if($null -eq $original){$original=$_}
+    }
+    if($null -ne $original){throw $original}
     return $receipt
 }
 
@@ -167,6 +221,7 @@ function Invoke-MatureSessionStop($State,[string[]]$Arguments,[int]$TimeoutSecon
     $State.stopAttempted=$true
     $stop=Start-CpuProcess $State.tool $Arguments (Join-Path $State.directory 'stop')
     $State.stopReceipt=Complete-CpuProcess $stop $TimeoutSeconds
+    $State.stopReceipt.commandIndex=$index
     $State.stopAcknowledged=$false
     if($State.stopReceipt.timedOut -or -not$State.stopReceipt.outputComplete -or $State.stopReceipt.exitCode -ne 0)
     {throw 'Owned standard stop failed/timed out/incomplete.'}
@@ -182,7 +237,7 @@ function Confirm-MatureMonitorCompletion($State,[int]$ExitTimeoutSeconds,[int]$D
     {
         $receipt=Complete-MatureMonitor $State $ExitTimeoutSeconds $DrainTimeoutSeconds
         $stderr=[string](Get-Content (Join-Path $State.directory 'start.stderr.log') -Raw)
-        if(-not$State.stopAcknowledged -or $receipt.timedOut -or -not$receipt.outputComplete -or $receipt.exitCode -ne 0 -or
+        if(-not$State.stopAcknowledged -or $receipt.timedOut -or -not$receipt.captureComplete -or $receipt.exitCode -ne 0 -or
             -not[string]::IsNullOrWhiteSpace($stderr))
         {throw 'Owned monitor/stop finalization incomplete or failed; no finalized recording eligibility.'}
     }

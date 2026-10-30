@@ -137,3 +137,32 @@ Invariance is now against 0b98082941: three timed/proof/output function bodies,
 21 non-collector calls of the prior23, default quality/decoder/guards remain
 unchanged. Collector lifecycle and retention eligibility intentionally
 change; old full collector-command invariance is no longer claimed.
+
+### Monitor persistence fault boundaries (P49-RISK-002/003)
+
+After parsing the exact Running ACK and checking live monitor/target identity,
+caller-owned stop state AND the validated ACK text are set before prefix,
+stderr-snapshot or receipt I/O. Failed prefix persistence still throws the
+original file error, prevents work and requires exactly one owned stop.
+Retention validates that captured ACK field rather than requiring the
+independently persisted prefix file to have succeeded.
+
+Completion captures exit/drain observations in caller memory before any log
+write. Its whole observation/log path is under stream-resource cleanup;
+stdout persistence failure cannot bypass closing the stderr writer and both
+redirected readers. Persistence and disposal errors remain separate from
+observations and cannot replace the original error. The receipt is attempted
+after resources close; failed persistence never reports capture I/O complete.
+
+The two added real fake-child filesystem cases inject a prefix directory
+collision only on a read containing the valid Running ACK, and a full-stdout
+collision after the owned monitor actually exits. They prove original
+error/stack, no work after failed readiness persistence, exactly-once stop,
+closed/exclusively-readable stderr, staged exit/drain evidence and provisional
+archive bytes with failed stage/incomplete flags. Recorded command indices
+bind full argv (including fake script-host prefix); real VSDiagnostics uses
+index0. No historical run/check or actual collector readiness is retrofitted.
+The same real filesystem proof also covers failed ready-receipt and final
+monitor-receipt persistence: authority/observations remain in caller memory,
+resources close, original errors survive, and final session metadata retains
+the observed receipt even when its independent receipt file cannot be saved.

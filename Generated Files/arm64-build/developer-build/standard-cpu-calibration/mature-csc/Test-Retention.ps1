@@ -69,10 +69,10 @@ try
     $session=@{syntheticFixture=$true;noCollectorStarted=$true;sessionId=$guid;started=$true;stopAttempted=$true;stopAcknowledged=$true;output=$archive
         identity=$identity
         startReceipt=@{ready=$true;sessionId=$guid;monitorAliveAtReady=$true;pid=$PID;birthTicks=$identity.startTicks
-            executable=$identity.executablePath;targetIdentity=$identity;arguments=$startArgs}
-        monitorReceipt=@{exitCode=0;timedOut=$false;outputComplete=$true;pid=$PID;birthTicks=$identity.startTicks
+            executable=$identity.executablePath;targetIdentity=$identity;arguments=$startArgs;commandIndex=0;ackText="Session ${guid}: {$guid}`r`n  Running`r`n"}
+        monitorReceipt=@{exitCode=0;timedOut=$false;outputComplete=$true;captureComplete=$true;pid=$PID;birthTicks=$identity.startTicks
             executable=$identity.executablePath;arguments=$startArgs}
-        stopReceipt=@{exitCode=0;timedOut=$false;outputComplete=$true;arguments=@('stop',$guid,"/output:$archive")}}
+        stopReceipt=@{exitCode=0;timedOut=$false;outputComplete=$true;commandIndex=0;arguments=@('stop',$guid,"/output:$archive")}}
     Write-MatureClosedJson $session (Join-Path $capture 'session-final.json')
     Write-MatureClosedJson $session.startReceipt (Join-Path $capture 'start.receipt.json')
     Write-MatureClosedJson $session.stopReceipt (Join-Path $capture 'stop.receipt.json')
@@ -217,6 +217,14 @@ try
         if($kind -ceq 'foreignOutput'){$candidate.output=Join-Path $root 'not-owned.diagsession'}
         Write-MatureClosedJson $candidate (Join-Path $cap 'session-final.json')
         $ackGuid=if($kind -ceq 'foreignAck'){[Guid]::NewGuid().ToString()}else{$guid}
+        if($kind -ceq 'foreignAck')
+        {
+            # Mutate the authoritative validated ACK field, not just its
+            # separately persisted transcript.
+            $candidate.startReceipt.ackText="Session ${ackGuid}: {$ackGuid}`r`n  Running`r`n"
+            [IO.File]::Delete((Join-Path $cap 'session-final.json'))
+            Write-MatureClosedJson $candidate (Join-Path $cap 'session-final.json')
+        }
         [IO.File]::WriteAllText((Join-Path $cap 'start.stdout-prefix.log'),"Session ${ackGuid}: {$ackGuid}`r`n  Running`r`n")
         Copy-MatureClosedFile (Join-Path $capture 'stop.stdout.log') (Join-Path $cap 'stop.stdout.log')
         $held=$null
