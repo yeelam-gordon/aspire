@@ -41,7 +41,8 @@ $q=Get-Content (Join-Path $capture 'quality\etl-quality.json') -Raw|ConvertFrom-
 $cpu=Get-Content (Join-Path $capture 'decode-csc\cpu.json') -Raw|ConvertFrom-Json
 $pass=$q.completed -and $q.strictConversionCompleted -and $q.headers.Count -eq 1 -and
     $q.headers[0].EventsLost -eq 0 -and $q.headers[0].BuffersLost -eq 0 -and
-    ([DateTime]$q.headers[0].endUtc) -ge ([DateTime]$work.mainCsc.finishedUtc) -and
+    ([DateTime]$q.headers[0].startUtc) -le ([DateTime]$target.command.startUtc) -and
+    ([DateTime]$q.headers[0].endUtc) -ge ([DateTime]$target.command.exitUtc) -and
     $cpu.phases[0].samples -gt 0 -and $cpu.phases[0].capHits -eq 0
 Write-CpuJson @{qualifiedFileAndSampleGate=$pass;quality=$q;mainCscCoverage=$cpu.phases
     vendorUpstreamDrop='unknown, not zero';stackUnwindCompleteness='not separately exposed'

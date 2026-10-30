@@ -223,11 +223,17 @@ finally
     if($snapshotPassed){Restore-PairedSource}
     try{Reset-PrivateProcesses}catch{$cleanupFailure=@{error=$_.ToString();stack=$_.ScriptStackTrace};Write-PairedJson $cleanupFailure (Join-Path $ResultsDirectory 'cleanup-failure.json')}
     $checks=@($configs|ForEach-Object{@{path=$_.path;bytesUnchanged=[Linq.Enumerable]::SequenceEqual[byte]($_.bytes,[IO.File]::ReadAllBytes($_.path));timestampUnchanged=$_.time.Ticks -eq [IO.File]::GetLastWriteTimeUtc($_.path).Ticks}})
+    $restoredBytes=[Linq.Enumerable]::SequenceEqual[byte]($originalSource,[IO.File]::ReadAllBytes($sourceFile))
+    $restoredTime=$sourceTime.Ticks -eq [IO.File]::GetLastWriteTimeUtc($sourceFile).Ticks
+    $sourceStatus=@(& git -C $RepositoryRoot status --porcelain)
+    $remaining=@(Get-PrivateProcesses)
+    $restorationPassed=$snapshotPassed -and $restoredBytes -and $restoredTime -and $sourceStatus.Count -eq 0 -and
+        $remaining.Count -eq 0 -and @($checks|Where-Object{-not $_.bytesUnchanged -or -not $_.timestampUnchanged}).Count -eq 0
+    if(-not$restorationPassed -and -not$failure){$failure=@{error='Source/SDK/absence restoration gate failed.'}}
     Write-PairedJson @{failure=$failure;cleanupFailure=$cleanupFailure;completedCases=$cases.Count;protectedFiles=$configs.Count;sdkChecks=$checks
-        sourceBytesRestored=[Linq.Enumerable]::SequenceEqual[byte]($originalSource,[IO.File]::ReadAllBytes($sourceFile))
-        sourceTimestampRestored=$sourceTime.Ticks -eq [IO.File]::GetLastWriteTimeUtc($sourceFile).Ticks
-        sourceHead=(& git -C $RepositoryRoot rev-parse HEAD).Trim();sourceStatus=@(& git -C $RepositoryRoot status --porcelain)
-        identities=@($observed.Values);confirmedExited=@($confirmedExited.Keys);remainingPrivateProcesses=@(Get-PrivateProcesses)
+        sourceBytesRestored=$restoredBytes;sourceTimestampRestored=$restoredTime;restorationPassed=$restorationPassed
+        sourceHead=(& git -C $RepositoryRoot rev-parse HEAD).Trim();sourceStatus=$sourceStatus
+        identities=@($observed.Values);confirmedExited=@($confirmedExited.Keys);remainingPrivateProcesses=$remaining
         hostedCapture=[bool]$HostedCapture} (Join-Path $ResultsDirectory 'final-state.json')
     Write-PairedJson @($commands.ToArray()) (Join-Path $ResultsDirectory 'commands.json')
 }
