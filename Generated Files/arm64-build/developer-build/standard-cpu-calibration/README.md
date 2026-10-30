@@ -1,6 +1,8 @@
 # P48 isolated standard CPU calibration preparation
 
-This branch is **local preparation only**. No push or dispatch is authorized.
+The current work is **offline inspection only**. No additional push, dispatch
+or recording is authorized. Earlier hosted attempts and their failed quality
+checks remain historical evidence, not outcomes this decoder can retrofit.
 The eventual named question is mature common Csc CPU ownership, not a cold
 Windows penalty. This fixture does not build/profile Aspire or reopen P21.
 
@@ -57,8 +59,36 @@ Pinned source:
 [TraceEvent 3.1.28 ZippedETL.cs](https://github.com/microsoft/perfview/blob/5fc5e080bc57237df3371def6946275b7c6552a9/src/TraceEvent/ZippedETL.cs).
 It explicitly handles `.diagsession` GUID `symcache`/`pdbcache` paths and rejects
 zero/multiple ETLs. Archive plumbing fixtures exercise those actual APIs.
-That is a real headless path to test, **not** proof of this CPUAgent version's
-as-yet-unrecorded archive. The first recording must surface incompatibility.
+Source support alone is not proof of an actual CPUAgent archive. The retained
+first recording separately demonstrated its one-ETL archive compatibility;
+offline inspection preserves that run's failed quality-check outcome.
+
+## Retained-trace offline inspection
+
+The decoder now also emits one coverage row per owned sample, cap hits,
+maximum walked depth, named/unnamed leaf coverage, full-stack name coverage
+and exact touched-module identities. Inclusive frame counts remain distinct
+from leaf samples. Existing bounded stack examples and the old capture-quality
+guard are unchanged.
+
+```powershell
+& $dotnet $decoder etl-quality $ownedEtl $newQualityOutput
+& $dotnet $decoder $ownedEtlx $identity $phases $newCoverageOutput
+& $dotnet $decoder symbols $ownedEtlx $identity $phases $matchingSdk $newSymbolOutput
+```
+
+`etl-quality` reads documented ETW logfile-header fields through the pinned
+public parser; these are not universal collector-internal loss counters.
+`symbols` copies the input index, filters only the owned PID/phase windows,
+and verifies image ID/size/checksum plus exact PDB GUID/age/name against the
+matching SDK before querying public Microsoft symbols for CoreCLR/CoreLib.
+It uses standard `SymbolReader`/DIA mapping, a private output cache and the
+existing package's ARM64 DIA asset. No unsafe name matching, native PDB
+generation, SDK mutation, session APIs or collector action is involved.
+`clrjit` absent from the sample window is unmeasured, not a symbol failure.
+
+These are new offline outputs, not a retrospective green result for the
+original recording. The parent owns any prospective attribution gate.
 
 ## Local commands (no recording)
 

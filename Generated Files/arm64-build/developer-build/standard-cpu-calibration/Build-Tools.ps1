@@ -42,7 +42,10 @@ foreach ($name in @('KnownWork', 'CpuDecoder'))
 Get-ChildItem -LiteralPath $library -Filter '*.dll' | Copy-Item -Destination $Output
 $native = Join-Path $Output 'arm64'
 $null = New-Item -ItemType Directory -Path $native
-Copy-Item -LiteralPath (Join-Path $TraceEventPackage 'build\native\arm64\KernelTraceControl.dll') -Destination $native
+foreach ($file in @('KernelTraceControl.dll', 'msdia140.dll'))
+{
+    Copy-Item -LiteralPath (Join-Path $TraceEventPackage "build\native\arm64\$file") -Destination $native
+}
 Write-CpuJson @{
     sdk = $Sdk; compilerVersion = $version; runtime = $runtime; traceEventVersion = '3.1.28'
     nativeKernelTraceControl = Get-CpuPeMachine (Join-Path $native 'KernelTraceControl.dll')
