@@ -16,6 +16,30 @@ namespace Infrastructure.Tests.TestTriggerMap;
 public sealed class TestTriggerMapTests
 {
     [Fact]
+    public void StandardCpuCalibrationInputsHaveOnlyDedicatedManualConsumer()
+    {
+        var fixture = SelectWithRealMap("Generated Files/arm64-build/developer-build/standard-cpu-calibration/CpuDecoder.cs");
+        Assert.False(fixture.SelectsAll);
+        Assert.Empty(fixture.UnmatchedFiles);
+        Assert.Empty(fixture.TestProjects);
+        Assert.Empty(fixture.Jobs);
+
+        var workflow = SelectWithRealMap(".github/workflows/compare-arm64-developer-build.yml");
+        Assert.False(workflow.SelectsAll);
+        Assert.Empty(workflow.UnmatchedFiles);
+        Assert.Equal(["Infrastructure.Tests"], workflow.TestProjects);
+        Assert.Empty(workflow.Jobs);
+    }
+
+    [Fact]
+    public void StandardCpuCalibrationClassificationDoesNotHideAdjacentExperiments()
+    {
+        var result = SelectWithRealMap("Generated Files/arm64-build/developer-build/unclassified-experiment/Probe.cs");
+        Assert.True(result.SelectsAll);
+        Assert.Equal(["Generated Files/arm64-build/developer-build/unclassified-experiment/Probe.cs"], result.UnmatchedFiles);
+    }
+
+    [Fact]
     public void IndependentNativeWorkflowSelectsInfrastructureWithoutExtraJobs()
     {
         var result = SelectWithRealMap(".github/workflows/native-hosting-validation.yml");

@@ -96,6 +96,10 @@ prefilter:
 # Each is either covered precisely by Layer 1 (the graph index sees the linked/shared-file consumers)
 # or intentionally outside GitHub PR CI. Not a no-op for selection: Layer 1 still unions in the real consumers.
 ignore:
+  # P48's owned-branch, dispatch-only calibration consumes these standalone
+  # fixtures/decoder/scripts. No Aspire.slnx or regular-PR test/job consumes them.
+  # The workflow file still reaches the general Infrastructure.Tests route.
+  - Generated Files/arm64-build/developer-build/standard-cpu-calibration/**
   - src/Components/Common/**                            # link-compiled into many components; Layer 1 covers
   - src/Vendoring/OpenTelemetry.Instrumentation.*/**    # glob-compiled into the Redis/Kafka components; Layer 1 covers
   # These verifiers run in every unconditional native CLI archive build. Selecting a test target for
