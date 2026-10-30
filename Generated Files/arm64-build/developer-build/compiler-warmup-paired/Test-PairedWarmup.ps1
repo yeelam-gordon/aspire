@@ -247,6 +247,109 @@ Check 'Cleanup callback failure propagates without silently running later phases
     Reject { Invoke-PairedCleanupPlan $plan { throw 'request failed' } { $events.Add('stop') } { $events.Add('absence') } }
     Require ($events.Count -eq 0)
 }
+$transition = Get-Content (Join-Path $PSScriptRoot ([IO.Path]::Combine('fixtures','mac-ack-exit-transition.json'))) -Raw | ConvertFrom-Json
+$exiting = @{psExitCode=0;raw=@($transition.samples[1].raw);native=ConvertFrom-PairedMacState $transition.samples[1].raw $transition.compiler.pid}
+Check 'Post-ACK captured unavailable fields are observation-only, never action or absence authority' {
+    $decision = Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition $exiting `
+        $transition.nativeStart $true $false $transition.sdkRoot $false 'post-ack-observation'
+    Require ($decision.state -ceq 'observation-only' -and -not $decision.authorizesProcessAction -and -not $decision.confirmsAbsence)
+    Reject { Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition $exiting `
+        $transition.nativeStart $true $false $transition.sdkRoot $false 'authority' }
+    Reject { Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition $exiting `
+        $transition.nativeStart $true $false $transition.sdkRoot $false 'absence' }
+    $absentObservation = Get-PairedProbeDecision $transition.compiler @{present=$false;complete=$false} @{psExitCode=1;raw=@()} `
+        $transition.nativeStart $true $true $transition.sdkRoot $false 'post-ack-observation'
+    Require (-not $absentObservation.confirmsAbsence)
+}
+Check 'Actual request phase reaches independently proved parent reset after ACK observation then strict absence' {
+    & {
+        . (Join-Path $PSScriptRoot 'Paired-Cleanup.ps1')
+        $sdkRoot = $transition.sdkRoot
+        $config = Join-Path $sdkRoot 'unused-runtimeconfig.json'
+        $ResultsDirectory = 'unused-fixture-result'
+        $cleanup = [Collections.Generic.List[object]]::new()
+        $cleanupByKey = @{}
+        $shutdownRequests = @{}
+        $events = [Collections.Generic.List[string]]::new()
+        $fixtureState = @{ parentStopped = $false; observation = $null }
+        function Save-PairedCleanup { }
+        function Invoke-PairedCommand { $events.Add('ipc-ack'); return @{exitCode=0} }
+        function Read-PairedOwnedState($Identity, $Receipt, $Phase)
+        {
+            if ($Phase -eq 'authority')
+            {
+                return @{state='owned-live'}
+            }
+            if ($Phase -ne 'post-ack-observation') { throw 'Request used an invalid observation phase.' }
+            $fixtureState.observation = Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition $exiting `
+                $transition.nativeStart $true $false $transition.sdkRoot $false $Phase
+            $events.Add("sample:$($exiting.native.state)")
+            return $fixtureState.observation
+        }
+        $plan = Get-PairedCleanupPlan @($transition.parent,$transition.compiler) $transition.sdkRoot `
+            ([DateTime]'2026-10-30T05:39:00Z') $false
+        Invoke-PairedCleanupPlan $plan {
+            param($identity)
+            Request-PairedCompilerShutdown $identity
+        } {
+            param($identity)
+            Require ($identity.pid -eq $transition.parent.pid -and $identity.kind -eq 'msbuild-helper')
+            Require ($plan.parentEdges[0].parent.startTicks -eq $identity.startTicks)
+            $events.Add('proved-parent-reset')
+            $fixtureState.parentStopped = $true
+        } {
+            param($identity)
+            Require $fixtureState.parentStopped
+            if ($identity.kind -eq 'compiler')
+            {
+                $z = @{psExitCode=0;raw=@($transition.samples[2].raw);native=ConvertFrom-PairedMacState $transition.samples[2].raw $identity.pid}
+                $decision = Get-PairedProbeDecision $identity $transition.runtimeDuringTransition $z $transition.nativeStart `
+                    $true $true $transition.sdkRoot $false 'absence'
+                Require ($decision.state -eq 'owned-zombie' -and -not $decision.confirmsAbsence)
+                $events.Add('sample:Z<')
+            }
+            $final = Get-PairedProbeDecision $identity @{present=$false;complete=$false} @{psExitCode=1;raw=@()} `
+                $transition.nativeStart $true $true $transition.sdkRoot $false 'absence'
+            Require $final.confirmsAbsence
+            $events.Add("absent:$($identity.pid)")
+        }
+        Require ($events.IndexOf('ipc-ack') -lt $events.IndexOf('sample:?<E'))
+        Require ($events.IndexOf('sample:?<E') -lt $events.IndexOf('proved-parent-reset'))
+        Require ($events.IndexOf('proved-parent-reset') -lt $events.IndexOf('sample:Z<'))
+        Require ($events.IndexOf('sample:Z<') -lt $events.IndexOf('absent:4622'))
+        Require (-not $fixtureState.observation.authorizesProcessAction -and -not $fixtureState.observation.confirmsAbsence)
+    }
+}
+Check 'Observation cannot hide query errors, concrete reuse/path/parent contradictions or missing ACK' {
+    Reject { Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition $exiting $transition.nativeStart `
+        $false $false $transition.sdkRoot $false 'post-ack-observation' }
+    Reject { Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition @{psExitCode=1;raw=@('permission denied')} `
+        $transition.nativeStart $true $false $transition.sdkRoot $false 'post-ack-observation' }
+    $changed = $transition.runtimeDuringTransition | ConvertTo-Json | ConvertFrom-Json
+    $changed.startTicks = $transition.compiler.startTicks + 1
+    Reject { Get-PairedProbeDecision $transition.compiler $changed $exiting $transition.nativeStart `
+        $true $false $transition.sdkRoot $false 'post-ack-observation' }
+    $changed.startTicks = $null
+    $changed.executablePath = '/foreign/compiler'
+    Reject { Get-PairedProbeDecision $transition.compiler $changed $exiting $transition.nativeStart `
+        $true $false $transition.sdkRoot $false 'post-ack-observation' }
+    Reject { Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition $exiting 'different birth' `
+        $true $false $transition.sdkRoot $false 'post-ack-observation' }
+    $badParent = @{psExitCode=0;raw=@('captured');native=@{pid=4622;parentPid=12345;nativeStart=$transition.nativeStart;nativePath='(VBCSCompiler)'}}
+    Reject { Get-PairedProbeDecision $transition.compiler $transition.runtimeDuringTransition $badParent $transition.nativeStart `
+        $true $false $transition.sdkRoot $false 'post-ack-observation' }
+}
+Check 'Identity contradiction aborts plan before any parent action, while unrelated unknown states get no authority' {
+    $plan = Get-PairedCleanupPlan @($transition.parent,$transition.compiler) $transition.sdkRoot ([DateTime]'2026-10-30T05:39:00Z') $false
+    $state = @{ parentAction = $false }
+    $bad = @{present=$true;complete=$true;pid=4622;startTicks=$transition.compiler.startTicks+1;executablePath=$transition.compiler.executablePath}
+    Reject {
+        Invoke-PairedCleanupPlan $plan {
+            Get-PairedProbeDecision $transition.compiler $bad $exiting $transition.nativeStart $true $false $transition.sdkRoot $false 'post-ack-observation'
+        } { $state.parentAction = $true } { throw 'No confirmation expected.' }
+    }
+    Require (-not $state.parentAction)
+}
 $fixture = Join-Path $ResultsDirectory 'output-fixture'
 try
 {

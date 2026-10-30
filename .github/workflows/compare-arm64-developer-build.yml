@@ -5,6 +5,13 @@ run-name: Paired ordinary Hosting default compiler warm-up (A-A)
 # Dispatch remains subject to a separate parent-owned long-session/audit gate.
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Native platform validation scope
+        type: choice
+        required: true
+        default: both
+        options: [both, windows, macos]
 
 permissions:
   contents: read
@@ -20,8 +27,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two hosts; both default lifetimes run within each same host.
-        runner: [windows-11-vs2026-arm, macos-latest]
+        # Default both; focused validation preserves the full per-host workload.
+        # An unknown selection has no mapping, never a silent broader fallback.
+        runner: ${{ fromJSON('{"both":["windows-11-vs2026-arm","macos-latest"],"windows":["windows-11-vs2026-arm"],"macos":["macos-latest"]}')[inputs.platform] }}
     steps:
       - name: Precreate evidence and ownership epoch
         shell: pwsh

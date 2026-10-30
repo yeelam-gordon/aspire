@@ -24,7 +24,8 @@ function Add-PairedCleanupFailure($Receipt, [string]$Phase, $Failure)
         stack = $Failure.ScriptStackTrace; utc = [DateTime]::UtcNow.ToString('O') })
 }
 
-function Read-PairedOwnedState($Identity, $Receipt)
+function Read-PairedOwnedState($Identity, $Receipt,
+    [ValidateSet('authority','post-ack-observation','absence')][string]$Phase)
 {
     $key = "$($Identity.pid):$($Identity.startTicks)"
     $diagnostic = Get-ExitDiagnostic $Identity
@@ -38,12 +39,15 @@ function Read-PairedOwnedState($Identity, $Receipt)
     $acknowledged = $shutdownRequests.ContainsKey($key) -and $shutdownRequests[$key].acknowledged
     $parentKey = $ownedParentProofs[$key]
     $parentReset = [bool]($parentKey -and $stopRequests.ContainsKey($parentKey) -and $stopRequests[$parentKey].stopIssued)
-    $probe = @{ utc = [DateTime]::UtcNow.ToString('O'); runtime = $runtime; diagnostic = $diagnostic }
+    $probe = @{ utc = [DateTime]::UtcNow.ToString('O'); runtime = $runtime; diagnostic = $diagnostic; phase = $Phase }
     if (-not $Receipt.ContainsKey('before')) { $Receipt.before = $diagnostic }
     try
     {
-        $probe.state = Get-PairedExitState $Identity $runtime $diagnostic $nativeBirths[$key] `
-            $acknowledged $parentReset $sdkRoot $IsWindows
+        $decision = Get-PairedProbeDecision $Identity $runtime $diagnostic $nativeBirths[$key] `
+            $acknowledged $parentReset $sdkRoot $IsWindows $Phase
+        $probe.state = $decision.state
+        $probe.authorizesProcessAction = $decision.authorizesProcessAction
+        $probe.confirmsAbsence = $decision.confirmsAbsence
         if (-not $IsWindows -and $probe.state -eq 'owned-live' -and -not $nativeBirths.ContainsKey($key))
         {
             $nativeBirths[$key] = $diagnostic.native.nativeStart
@@ -65,12 +69,13 @@ function Request-PairedCompilerShutdown($Identity)
     $receipt = Get-PairedCleanupReceipt $Identity
     try
     {
-        $probe = Read-PairedOwnedState $Identity $receipt
         if ($shutdownRequests.ContainsKey($key))
         {
             if (-not $shutdownRequests[$key].acknowledged) { throw 'Prior shutdown request failed; no automatic IPC retry.' }
+            $receipt.afterRequest = Read-PairedOwnedState $Identity $receipt 'post-ack-observation'
             return
         }
+        $probe = Read-PairedOwnedState $Identity $receipt 'authority'
         if ($probe.state -ne 'owned-live') { throw 'Compiler not live for its first owned shutdown request; graceful gate unproven.' }
         $pipe = Get-PairedPipe $Identity.commandEvidence
         $receipt.pipe = $pipe
@@ -82,7 +87,11 @@ function Request-PairedCompilerShutdown($Identity)
         $receipt.shutdownAcknowledged = $true
         # An acknowledged request is NOT exit proof. In particular, do not
         # WaitForExit on a non-child Unix zombie before its owned parent reset.
-        $receipt.afterRequest = Read-PairedOwnedState $Identity $receipt
+        # This sample may catch the captured ?<E -> Z< transition. It can expose
+        # contradictions/query failures, but unavailable fields do not grant
+        # child authority or prevent the independently proved parent reset.
+        # Only the later bounded absence phase may confirm exit.
+        $receipt.afterRequest = Read-PairedOwnedState $Identity $receipt 'post-ack-observation'
     }
     catch { Add-PairedCleanupFailure $receipt 'compiler-shutdown-request' $_; throw }
     finally { Save-PairedCleanup }
@@ -100,7 +109,7 @@ function Stop-PairedOwnedParent($Identity)
         {
             throw 'Not an exact owned node/launch command; never stop a compiler or unproved parent.'
         }
-        $probe = Read-PairedOwnedState $Identity $receipt
+        $probe = Read-PairedOwnedState $Identity $receipt 'authority'
         if ($probe.state -in @('absent','owned-zombie','pending-exit')) { return }
         if ($probe.state -ne 'owned-live') { throw 'Parent runtime/native identity is unresolved; refusing stop.' }
         if ($stopRequests.ContainsKey($key)) { throw 'Prior parent stop remains unresolved; no repeated kill.' }
@@ -133,7 +142,7 @@ function Confirm-PairedPrivateAbsence($Identity)
         $timer = [Diagnostics.Stopwatch]::StartNew()
         do
         {
-            $probe = Read-PairedOwnedState $Identity $receipt
+            $probe = Read-PairedOwnedState $Identity $receipt 'absence'
             if ($probe.state -eq 'absent')
             {
                 $receipt.exitConfirmed = $true

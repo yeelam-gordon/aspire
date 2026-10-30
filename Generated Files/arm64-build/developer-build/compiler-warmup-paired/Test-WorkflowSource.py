@@ -1,6 +1,7 @@
 """Manual-only calibration guards; no product builds, runner claims or dispatch."""
 
 import pathlib
+import json
 import re
 import subprocess
 
@@ -14,10 +15,22 @@ assert list(workflow["on"]) == ["workflow_dispatch"]
 assert workflow["permissions"] == {"contents": "read"}
 assert list(workflow["jobs"]) == ["paired_warmup"]
 job = workflow["jobs"]["paired_warmup"]
-assert job["strategy"] == {
-    "fail-fast": "false",
-    "matrix": {"runner": ["windows-11-vs2026-arm", "macos-latest"]},
+scope = workflow["on"]["workflow_dispatch"]["inputs"]["platform"]
+assert scope["type"] == "choice" and scope["required"] == "true"
+assert scope["default"] == "both" and scope["options"] == ["both", "windows", "macos"]
+assert job["strategy"]["fail-fast"] == "false"
+expression = job["strategy"]["matrix"]["runner"]
+match = re.fullmatch(r"\$\{\{\s*fromJSON\('(.+)'\)\[inputs\.platform\]\s*\}\}", expression)
+assert match
+matrix = json.loads(match.group(1))
+assert matrix == {
+    "both": ["windows-11-vs2026-arm", "macos-latest"],
+    "windows": ["windows-11-vs2026-arm"],
+    "macos": ["macos-latest"],
 }
+assert set(matrix) == set(scope["options"])
+for bad in ("", "all", "linux", "macos-latest", "windows,macos", "../", "Both"):
+    assert bad not in matrix, f"Unexpected platform selection accepted: {bad}"
 assert job["timeout-minutes"] == "30"
 assert re.fullmatch(
     r"\s*github\.repository == 'yeelam-gordon/aspire' &&\s*"
@@ -81,5 +94,5 @@ assert "/p:UseSharedCompilation" not in harness and "/nr:" not in harness
 assert "candidate" not in harness.lower() and "New-PgoCandidate" not in harness
 assert not re.search(r"WriteAllBytes\(\$config|SetLastWriteTimeUtc\(\$config", harness)
 assert "Get-PairedRuntimeImageHeader $bytes $IsWindows" in harness
-assert "ConvertFrom-PairedMacState" in harness and "Get-PairedExitState" in cleanup
+assert "ConvertFrom-PairedMacState" in harness and "Get-PairedProbeDecision" in cleanup
 print("Manual-only YAML, unchanged pins, 44-build A/A, separate 3-build diagnostic, normal-policy and source guards passed.")

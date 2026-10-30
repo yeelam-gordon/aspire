@@ -88,6 +88,12 @@ regular-PR test consumer; no invented test-trigger-map route is added.
 Existing first-party action pins are unchanged. Artifacts upload `always()`;
 timing, CPU, diagnostics and restoration gates remain separate.
 
+Manual `platform` is a constrained choice: **both** (default), **windows**, or
+**macos**. A fixed mapping selects only the existing native labels; invalid
+values have no mapping, not a broader fallback. Every selected host still runs
+both default twenty-edit lifetimes and its separate three-build diagnostic.
+No new action pin, product scope or automatic trigger is introduced.
+
 Windows smoke is harness validation, **not** a performance result. Actual Mac
 API/trace/cleanup coverage, full twenty-edit trajectories and hosted acquisition
 remain unvalidated until a separate fresh parent-owned gate. No push or
@@ -100,3 +106,20 @@ dot-generated files, while Mac enumeration omitted them. These repairs do not
 reconstruct old missing bytes or prove historical P29's cause. Captured-state
 ordering/null/reuse fixtures and real Windows Hidden-attribute copy/compare/ZIP
 fixtures are local checks, **not native Mac or GitHub artifact-upload passes**.
+
+Run `41009645939` verified complete 119-file uploads, but remains failed:
+the immediate post-ACK `?<E` sample was fed into the authority/absence
+classifier and aborted before independently proved parent reset. Finally
+observed `Z<` and established absence; that does not make the run pass.
+Post-ACK samples are now explicitly **observation-only**: unavailable fields
+are logged unresolved, never child-kill or exit authority. Concrete native
+query/reuse/path/parent contradictions still fail. Parent action independently
+revalidates registry/private path/epoch/PID/birth, and only the unchanged final
+bounded native+runtime absence phase can confirm exit. No transient ps-state
+whitelist was added. Native Mac repaired-source proof remains unexecuted.
+
+The timed harness, CPU endpoint implementation, build/quality/output scope,
+twenty-edit workload, CLR provider/buffers and readers are unchanged from
+`86276b9890`. A focused Mac-only validation may therefore be considered by the
+coordinator using prior accepted Windows evidence, but source invariance is
+not identical hardware/run context or permission to dispatch.

@@ -203,6 +203,76 @@ function Get-PairedExitState($Identity, $Runtime, $Diagnostic, [string]$NativeSt
     return 'owned-live'
 }
 
+function Get-PairedProbeDecision($Identity, $Runtime, $Diagnostic, [string]$NativeStart,
+    [bool]$ShutdownAcknowledged, [bool]$OwnedParentReset, [string]$SdkRoot, [bool]$Windows,
+    [ValidateSet('authority','post-ack-observation','absence')][string]$Phase)
+{
+    if ($Phase -ne 'post-ack-observation')
+    {
+        $state = Get-PairedExitState $Identity $Runtime $Diagnostic $NativeStart `
+            $ShutdownAcknowledged $OwnedParentReset $SdkRoot $Windows
+        return @{ state = $state; authorizesProcessAction = $state -eq 'owned-live'; confirmsAbsence = $state -eq 'absent' }
+    }
+
+    if (-not $ShutdownAcknowledged) { throw 'Observation phase requires an acknowledged exact owned shutdown.' }
+    # Observation is not liveness/action/absence validation. For example, the
+    # captured macOS line was:
+    #   4622 4619 ?<E Fri Oct 30 05:41:08 2026 (VBCSCompiler)
+    # Runtime birth/path were unavailable, followed by Z< and then absence.
+    # Retain this unresolved sample without whitelisting any ps state spelling.
+    # Concrete query failures/reuse/path contradictions still reject the plan.
+    if ($Windows)
+    {
+        if ($Diagnostic.native -and ($Diagnostic.native.CreationDate -isnot [DateTime] -or
+            $Diagnostic.native.ProcessId -ne $Identity.pid -or
+            [math]::Abs(($Diagnostic.native.CreationDate.ToUniversalTime().Ticks - $Identity.startTicks) / [TimeSpan]::TicksPerSecond) -gt 0.1))
+        {
+            throw 'Post-ack native PID/birth is unavailable or changed; no action permitted.'
+        }
+        if ($Diagnostic.native -and
+            -not [string]::IsNullOrWhiteSpace($Diagnostic.native.ExecutablePath) -and
+            -not (Test-OwnedProcessIdentity $Identity $Identity.pid $Identity.startTicks $Diagnostic.native.ExecutablePath $SdkRoot $true))
+        {
+            throw 'Post-ack concrete Windows native path changed; no action permitted.'
+        }
+    }
+    else
+    {
+        if ($Diagnostic.nativeParseError -or
+            -not (($Diagnostic.psExitCode -eq 1 -and $Diagnostic.raw.Count -eq 0) -or
+                ($Diagnostic.psExitCode -eq 0 -and $Diagnostic.raw.Count -eq 1 -and $Diagnostic.native)))
+        {
+            throw 'Post-ack native query/parse failed; no action permitted.'
+        }
+        if ($Diagnostic.native)
+        {
+            if ($Diagnostic.native.pid -ne $Identity.pid -or -not $NativeStart -or
+                $Diagnostic.native.nativeStart -cne $NativeStart -or
+                $Diagnostic.native.parentPid -notin @($Identity.parentPid,1))
+            {
+                throw 'Post-ack native PID/birth/parent contradicted the retained identity.'
+            }
+            $path = $Diagnostic.native.nativePath
+            if ([string]::IsNullOrWhiteSpace($path)) { throw 'Post-ack native path metadata unavailable; malformed query result.' }
+            if ($path.StartsWith('/', [StringComparison]::Ordinal) -and $path -cne $Identity.executablePath)
+            {
+                throw 'Post-ack concrete native path changed; no action permitted.'
+            }
+        }
+    }
+    if ($Runtime.present)
+    {
+        if ($Runtime.pid -ne $Identity.pid -or
+            ($null -ne $Runtime.startTicks -and $Runtime.startTicks -ne $Identity.startTicks) -or
+            (-not [string]::IsNullOrWhiteSpace($Runtime.executablePath) -and
+                -not (Test-OwnedProcessIdentity $Identity $Runtime.pid $Identity.startTicks $Runtime.executablePath $SdkRoot $Windows)))
+        {
+            throw 'Post-ack runtime PID/birth/path contradicted the retained identity.'
+        }
+    }
+    return @{ state = 'observation-only'; authorizesProcessAction = $false; confirmsAbsence = $false }
+}
+
 function Get-PairedEmbeddedDebug([string]$Outputs)
 {
     foreach ($project in @('Aspire.Hosting','Aspire.Hosting.Integration.Analyzers'))
