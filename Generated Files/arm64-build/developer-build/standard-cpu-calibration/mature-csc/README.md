@@ -63,7 +63,8 @@ timeout, permission or session identity from that missing data.
 ErrorRecord, phase, inner causes, invocation/stack and receipt paths before
 cleanup. Secondary cleanup/restoration/reporting errors do not replace it.
 The protocol rethrows the original record instead of a generic final message.
-Normal timed/quality/collector/CPU commands are unchanged.
+That initial repair kept timed/quality/collector/CPU commands unchanged;
+the prospectively selected monitor lifecycle below is a separate change.
 
 `Stage-Retention.ps1`/`Retention.ps1` create closed copied upload roots:
 metadata first as an independent always-upload artifact, then optional safe
@@ -84,5 +85,55 @@ ZIP bytes, incomplete manifest and failed-stage outputs must survive.
 The narrow retention reporting boundary contains persistence failure rather
 than recursively reporting it or aborting the remaining copies.
 `Test-RetentionInvariance.ps1` verifies exact unchanged functions/files and
-build/CPU/collector/cleanup call sequence against d3f2f2ba5a; the completed
-24-case workload proof is reused rather than rerun.
+ordinary build/CPU/cleanup call sequence against 0b98082941; the completed
+24-case ordinary workload proof is reused, not the new collector lifecycle.
+
+## Explicit monitor readiness (prospective local contract)
+
+The retained 41043270769 receipt printed the exact GUID and Running but its
+launcher did not exit within 12 seconds. Why the non-monitor CLI stayed
+alive remains unknown; old failed runs/data are not reinterpreted.
+
+Use the installed supported `/monitor` contract: the launcher stays alive
+until the session ends. `Monitor.ps1` incrementally reads stdout until a
+complete exact GUID/header + Running line while both monitor and target
+PID/birth/path are live. Concurrent stderr is drained to a private file.
+There is never an incremental read and ReadToEnd read on stdout together.
+Ready prefix, complete remaining stdout/stderr and identity/time receipts
+are retained. The existing generic process helper adds only opt-in deferred
+stream ownership; default calls keep their existing full-stream reads.
+
+Caller-owned state exists before readiness, so an acknowledged session
+survives work/receipt exceptions and is stopped in finally. Only exact
+proved Running authorizes that GUID's separate stop. Stop must acknowledge
+the exact GUID as Stopped; protocol success also requires bounded monitor
+exit0 and complete drains. Rejected ACKs grant no session authority: clean
+only the exact owned launcher, never another session/service. Production
+bounds remain readiness12/stop30/drains5 seconds, plus monitor-exit30.
+
+`Test-Monitor.ps1` executes these production functions with real fake CLI
+children, never VSDiagnostics or a fake GitHub capture context. It proves
+work after Running/before exit, stop/exit/drains, wrong/substr GUID,
+missing/error/collision/early exit, later nonzero, real inherited-pipe drain
+failure, stop timeout/wrong ACK, work exception and foreign birth/path cases.
+
+### Retain failed-protocol archives, do not mark them complete
+
+Prospectively separate retention from success. Exact owned live Running,
+matching successful Stopped/export ACK, matching output path and a closed
+readable nonempty ZIP authorize keeping the provided archive even if the
+monitor later fails. Such data is explicitly **PROVISIONAL**, stage/job
+failed and `raw_recording_complete=false`; safe raw upload remains enabled.
+No archive/ACK/ownership, foreign output or live/locked archive never qualifies.
+
+Complete recording status additionally requires matching monitor identity/
+argv, exit0/complete streams, all24 work cases, restoration and the existing
+qualified ETW gate. Retention tests prove monitor7 preserves exact ZIP bytes
+AND the primary error with incomplete outputs, plus all held-lock/compound/
+119-hidden-output cases. This does not retrofit older calibration history
+or claim new actual collector/CPU readiness.
+
+Invariance is now against 0b98082941: three timed/proof/output function bodies,
+21 non-collector calls of the prior23, default quality/decoder/guards remain
+unchanged. Collector lifecycle and retention eligibility intentionally
+change; old full collector-command invariance is no longer claimed.

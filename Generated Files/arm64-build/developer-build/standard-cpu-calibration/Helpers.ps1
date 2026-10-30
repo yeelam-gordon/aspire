@@ -61,7 +61,7 @@ function Get-CpuPeMachine([string]$Path)
     finally { $reader.Dispose() }
 }
 
-function Start-CpuProcess([string]$Executable, [string[]]$Arguments, [string]$Prefix)
+function Start-CpuProcess([string]$Executable, [string[]]$Arguments, [string]$Prefix, [switch]$DeferStreamReads)
 {
     $info = [Diagnostics.ProcessStartInfo]::new($Executable)
     $info.UseShellExecute = $false
@@ -74,8 +74,8 @@ function Start-CpuProcess([string]$Executable, [string[]]$Arguments, [string]$Pr
         birthTicks = $process.StartTime.ToUniversalTime().Ticks
         executable = [IO.Path]::GetFullPath($Executable)
         arguments = $Arguments; prefix = $Prefix
-        stdout = $process.StandardOutput.ReadToEndAsync()
-        stderr = $process.StandardError.ReadToEndAsync()
+        stdout = if ($DeferStreamReads) { $null } else { $process.StandardOutput.ReadToEndAsync() }
+        stderr = if ($DeferStreamReads) { $null } else { $process.StandardError.ReadToEndAsync() }
         startedUtc = [DateTime]::UtcNow
     }
 }

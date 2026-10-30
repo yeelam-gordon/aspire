@@ -181,7 +181,7 @@ try
     $errorState.phase='plain-control'
     Invoke-MatureBuild 'plain';Read-MatureBuild 'plain'
     Save-MatureOutputs (Join-Path $ResultsDirectory 'plain-outputs')
-    $state=$null
+    $state=@{started=$false;stopAttempted=$false}
     $attachment=@{attempted=[bool]$HostedCapture;meaning='Attach pause and background CPU are diagnostic, not throughput or a new request.'}
     try
     {
@@ -191,7 +191,7 @@ try
             . (Join-Path $PSScriptRoot 'Collector.ps1')
             $attachment.before=Read-PairedCpu $observed[$script:serverKey]
             $attachment.startUtc=[DateTime]::UtcNow
-            $state=Start-MatureCollection $observed[$script:serverKey] (Join-Path $ResultsDirectory 'capture')
+            Start-MatureCollection $observed[$script:serverKey] (Join-Path $ResultsDirectory 'capture') $state
             $attachment.endUtc=[DateTime]::UtcNow
             $attachment.after=Read-PairedCpu $observed[$script:serverKey]
         }
@@ -218,6 +218,17 @@ try
             catch{$state.compilerAliveProofError=$_.ToString();Register-ProtocolFailure $_ 'cleanup'}
             $errorState.phase='owned-collector-stop'
             try{Stop-MatureCollection $state}
+            catch{Register-ProtocolFailure $_ 'cleanup'}
+            $errorState.phase='owned-monitor-completion'
+            try{Confirm-MatureMonitorCompletion $state 30 5}
+            catch{Register-ProtocolFailure $_ 'cleanup'}
+        }
+        elseif($state.monitor)
+        {
+            # Missing/foreign ACK grants no session authority. Only the exact
+            # launcher we created may be cleaned up, never another session.
+            $errorState.phase='rejected-monitor-cleanup'
+            try{$null=Complete-MatureMonitor $state 0 5}
             catch{Register-ProtocolFailure $_ 'cleanup'}
         }
     }

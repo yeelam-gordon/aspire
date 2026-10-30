@@ -1,7 +1,8 @@
 . (Join-Path $PSScriptRoot 'Guard.ps1')
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'Helpers.ps1')
+. (Join-Path $PSScriptRoot 'Monitor.ps1')
 
-function Start-MatureCollection($Identity, [string]$Directory)
+function Start-MatureCollection($Identity, [string]$Directory, [hashtable]$State)
 {
     $null=Assert-MatureContext
     if (Test-Path $Directory) { throw 'Refusing collection overwrite.' }
@@ -23,34 +24,32 @@ function Start-MatureCollection($Identity, [string]$Directory)
         $config.Agents[0].Config.cpuSampleRate -ne 100 -or $config.Agents[0].Config.attachToChildProcesses -eq $true -or
         (Get-CpuPeMachine $agent) -ne '0xAA64' -or (Get-CpuPeMachine $runtime) -ne '0xAA64')
     { throw 'Supplied native ARM64 Low CPU configuration failed.' }
-    $state=@{sessionId=[Guid]::NewGuid().ToString();started=$false;stopAttempted=$false;tool=$tool;directory=$Directory
+    $values=@{sessionId=[Guid]::NewGuid().ToString();started=$false;stopAttempted=$false;tool=$tool;directory=$Directory
         identity=$Identity;configPath=$configPath;config=$config;serviceBefore=(Get-Service VSStandardCollectorService150).Status.ToString()
         files=@($tool,$agent,$runtime|ForEach-Object{$f=Get-Item $_;@{path=$_;bytes=$f.Length;version=$f.VersionInfo.FileVersion;machine=Get-CpuPeMachine $_}})}
+    foreach($key in $values.Keys){$State[$key]=$values[$key]}
     Write-CpuJson $state (Join-Path $Directory 'session-before.json')
     $help=Start-CpuProcess $tool @('start','/help') (Join-Path $Directory 'start-help')
     $hr=Complete-CpuProcess $help 10
     if ($hr.exitCode -ne 0 -or $hr.timedOut -or (Get-Content (Join-Path $Directory 'start-help.stdout.log') -Raw) -notmatch 'parsable Guid')
     { throw 'Installed GUID-session help failed.' }
     $scratch=Join-Path $Directory 'scratch'; $null=New-Item -ItemType Directory -Path $scratch
-    $start=Start-CpuProcess $tool @('start',$state.sessionId,"/attach:$($Identity.pid)","/loadConfig:$configPath","/scratchLocation:$scratch") (Join-Path $Directory 'start')
-    $state.startReceipt=Complete-CpuProcess $start 12
-    Write-CpuJson $state (Join-Path $Directory 'session-start.json')
-    if ($state.startReceipt.exitCode -ne 0 -or $state.startReceipt.timedOut)
-    { throw 'Session start failed/ambiguous/collision; no stop, new ID or retry.' }
-    $state.started=$true
-    Write-CpuJson $state (Join-Path $Directory 'session-start.json')
-    return $state
+    Begin-MatureMonitor $State @('start',$state.sessionId,"/attach:$($Identity.pid)","/loadConfig:$configPath","/scratchLocation:$scratch",'/monitor')
+    try{Wait-MatureMonitorReady $State 12}
+    catch
+    {
+        $original=$_
+        try{Save-MatureMonitorState $State 'session-start.json'}
+        catch{[Console]::Error.WriteLine("Secondary session-state persistence failure: $($_.Exception)")}
+        throw $original
+    }
+    Save-MatureMonitorState $State 'session-start.json'
 }
 
 function Stop-MatureCollection($State)
 {
     $null=Assert-MatureContext
-    if (-not $State.started -or $State.stopAttempted) { throw 'No successfully started owned session, or stop already attempted.' }
-    $State.stopAttempted=$true
     $State.output=Join-Path $State.directory 'mature-csc.diagsession'
-    $stop=Start-CpuProcess $State.tool @('stop',$State.sessionId,"/output:$($State.output)") (Join-Path $State.directory 'stop')
-    $State.stopReceipt=Complete-CpuProcess $stop 30
+    Invoke-MatureSessionStop $State @('stop',$State.sessionId,"/output:$($State.output)") 30
     $State.serviceAfter=(Get-Service VSStandardCollectorService150).Status.ToString()
-    Write-CpuJson $State (Join-Path $State.directory 'session-final.json')
-    if ($State.stopReceipt.exitCode -ne 0 -or $State.stopReceipt.timedOut) { throw 'Owned finalization failed/unknown; no retry.' }
 }

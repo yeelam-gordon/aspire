@@ -54,17 +54,32 @@ try
     {throw 'Durable original ErrorRecord fields were not preserved.'}
 
     $archive=Join-Path $capture 'mature-csc.diagsession'
-    $rawBytes=[Text.Encoding]::UTF8.GetBytes('SYNTHETIC finalized-file staging fixture; NOT a profiler recording.')
-    [IO.File]::WriteAllBytes($archive,$rawBytes)
+    $syntheticZip=[IO.Compression.ZipFile]::Open($archive,[IO.Compression.ZipArchiveMode]::Create)
+    try
+    {
+        $writer=[IO.StreamWriter]::new($syntheticZip.CreateEntry('SYNTHETIC-NOT-PROFILER-DATA.txt').Open())
+        try{$writer.Write('Owned readable archive fixture only.')}finally{$writer.Dispose()}
+    }
+    finally{$syntheticZip.Dispose()}
+    $rawBytes=[IO.File]::ReadAllBytes($archive)
     $guid=[Guid]::NewGuid().ToString()
     $pidValue=$PID
-    $session=@{syntheticFixture=$true;noCollectorStarted=$true;sessionId=$guid;started=$true;stopAttempted=$true;output=$archive
-        identity=@{pid=$pidValue;startTicks=(Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks}
-        startReceipt=@{exitCode=0;timedOut=$false;outputComplete=$true;arguments=@('start',$guid,"/attach:$pidValue")}
+    $identity=@{pid=$pidValue;startTicks=(Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks;executablePath=(Get-Process -Id $PID).Path}
+    $startArgs=@('start',$guid,"/attach:$pidValue",'/monitor')
+    $session=@{syntheticFixture=$true;noCollectorStarted=$true;sessionId=$guid;started=$true;stopAttempted=$true;stopAcknowledged=$true;output=$archive
+        identity=$identity
+        startReceipt=@{ready=$true;sessionId=$guid;monitorAliveAtReady=$true;pid=$PID;birthTicks=$identity.startTicks
+            executable=$identity.executablePath;targetIdentity=$identity;arguments=$startArgs}
+        monitorReceipt=@{exitCode=0;timedOut=$false;outputComplete=$true;pid=$PID;birthTicks=$identity.startTicks
+            executable=$identity.executablePath;arguments=$startArgs}
         stopReceipt=@{exitCode=0;timedOut=$false;outputComplete=$true;arguments=@('stop',$guid,"/output:$archive")}}
     Write-MatureClosedJson $session (Join-Path $capture 'session-final.json')
     Write-MatureClosedJson $session.startReceipt (Join-Path $capture 'start.receipt.json')
     Write-MatureClosedJson $session.stopReceipt (Join-Path $capture 'stop.receipt.json')
+    [IO.File]::WriteAllText((Join-Path $capture 'start.stdout-prefix.log'),"Session ${guid}: {$guid}`r`n  Running`r`n")
+    [IO.File]::WriteAllText((Join-Path $capture 'stop.stdout.log'),"Session ${guid}: {$guid}`r`n  Stopped`r`n")
+    Write-MatureClosedJson @{syntheticFixture=$true;failure=$null;completedCases=24;secondaryFailures=@();reportingFailures=@();restorationPassed=$true} (Join-Path $evidence 'measurements\final-state.json')
+    Write-MatureClosedJson @{syntheticFixture=$true;qualifiedFileAndSampleGate=$true} (Join-Path $capture 'qualified-gate.json')
     $manifest=@(Get-Content (Join-Path $ReferenceOutputs 'manifest.json') -Raw|ConvertFrom-Json)
     if($manifest.Count -ne 119){throw 'Expected previously proved real 119-file output corpus.'}
     $outputCopy=Join-Path $evidence 'measurements\target-outputs'
@@ -154,6 +169,68 @@ try
     $noFinal=Stage-MatureEvidence (Join-Path $Output 'unfinalized\evidence') (Join-Path $Output 'unfinalized\retained')
     if($noFinal.finalizedRawStaged -or $noFinal.stagePassed -or $noFinal.rawFilesAvailable)
     {throw 'Filename-only/unfinalized raw was incorrectly staged as complete.'}
+    $provisionalRoot=Join-Path $Output 'provisional-monitor-failure'
+    $provisionalEvidence=Join-Path $provisionalRoot 'evidence'
+    $provisionalCapture=Join-Path $provisionalEvidence 'measurements\capture'
+    $null=New-Item -ItemType Directory -Path $provisionalCapture
+    $provisional=$session|ConvertTo-Json -Depth 15|ConvertFrom-Json -AsHashtable
+    $provisional.output=Join-Path $provisionalCapture 'mature-csc.diagsession'
+    $provisional.stopReceipt.arguments=@('stop',$guid,"/output:$($provisional.output)")
+    $provisional.monitorReceipt.exitCode=7
+    [IO.File]::WriteAllBytes($provisional.output,$rawBytes)
+    Write-MatureClosedJson $provisional (Join-Path $provisionalCapture 'session-final.json')
+    Copy-MatureClosedFile (Join-Path $capture 'start.stdout-prefix.log') (Join-Path $provisionalCapture 'start.stdout-prefix.log')
+    Copy-MatureClosedFile (Join-Path $capture 'stop.stdout.log') (Join-Path $provisionalCapture 'stop.stdout.log')
+    try{throw 'ORIGINAL_MONITOR_EXIT_7'}
+    catch{$null=Write-MatureFailure $_ (Join-Path $provisionalEvidence 'measurements\errors') 'owned-monitor-completion' 'primary' @()}
+    $provisionalOutputs=Join-Path $provisionalRoot 'stage.outputs'
+    $hadProvisionalOutput=Test-Path Env:GITHUB_OUTPUT;$oldProvisionalOutput=$env:GITHUB_OUTPUT
+    $provisionalFailed=$false
+    try
+    {
+        $env:GITHUB_OUTPUT=$provisionalOutputs
+        try{& (Join-Path $PSScriptRoot 'Stage-Retention.ps1') -EvidenceRoot $provisionalEvidence -StageRoot (Join-Path $provisionalRoot 'retained')}
+        catch{$provisionalFailed=$_.Exception.Message -like 'P49 retention incomplete:*'}
+    }
+    finally{if($hadProvisionalOutput){$env:GITHUB_OUTPUT=$oldProvisionalOutput}else{Remove-Item Env:GITHUB_OUTPUT}}
+    $provisionalResult=Get-Content (Join-Path $provisionalRoot 'retained\metadata\retention-manifest.json') -Raw|ConvertFrom-Json
+    $provisionalError=@(Get-ChildItem (Join-Path $provisionalResult.metadataRoot 'measurements\errors') -Filter '*.json')[0]
+    if(-not$provisionalFailed -or -not$provisionalResult.provisionalRawStaged -or $provisionalResult.rawRecordingComplete -or
+        $provisionalResult.stagePassed -or -not$provisionalResult.finalizedRawStaged -or
+        ((Get-Content $provisionalOutputs) -join "`n") -cne "raw_files_available=true`nraw_recording_complete=false" -or
+        (Get-Content $provisionalError.FullName -Raw|ConvertFrom-Json).message -cne 'ORIGINAL_MONITOR_EXIT_7' -or
+        -not[Linq.Enumerable]::SequenceEqual[byte]($rawBytes,[IO.File]::ReadAllBytes((Join-Path $provisionalResult.rawRoot 'capture\mature-csc.diagsession'))))
+    {throw 'Owned stopped archive/primary cause was discarded or monitor failure promoted to success.'}
+    $eligibility=@()
+    foreach($kind in @('noRunning','foreignAck','noStop','foreignOutput','liveArchive'))
+    {
+        $root=Join-Path $Output "eligibility-$kind"
+        $source=Join-Path $root 'evidence'
+        $cap=Join-Path $source 'measurements\capture'
+        $null=New-Item -ItemType Directory -Path $cap
+        $candidate=$session|ConvertTo-Json -Depth 15|ConvertFrom-Json -AsHashtable
+        $candidate.output=Join-Path $cap 'mature-csc.diagsession'
+        $candidate.stopReceipt.arguments=@('stop',$guid,"/output:$($candidate.output)")
+        [IO.File]::WriteAllBytes($candidate.output,$rawBytes)
+        if($kind -ceq 'noRunning'){$candidate.startReceipt.ready=$false}
+        if($kind -ceq 'noStop'){$candidate.stopAcknowledged=$false}
+        if($kind -ceq 'foreignOutput'){$candidate.output=Join-Path $root 'not-owned.diagsession'}
+        Write-MatureClosedJson $candidate (Join-Path $cap 'session-final.json')
+        $ackGuid=if($kind -ceq 'foreignAck'){[Guid]::NewGuid().ToString()}else{$guid}
+        [IO.File]::WriteAllText((Join-Path $cap 'start.stdout-prefix.log'),"Session ${ackGuid}: {$ackGuid}`r`n  Running`r`n")
+        Copy-MatureClosedFile (Join-Path $capture 'stop.stdout.log') (Join-Path $cap 'stop.stdout.log')
+        $held=$null
+        try
+        {
+            if($kind -ceq 'liveArchive')
+            {$held=[IO.FileStream]::new((Join-Path $cap 'mature-csc.diagsession'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}
+            $rejected=Stage-MatureEvidence $source (Join-Path $root 'retained')
+        }
+        finally{if($null -ne $held){$held.Dispose()}}
+        if($rejected.finalizedRawStaged -or $rejected.rawFilesAvailable -or $rejected.rawRecordingComplete -or $rejected.stagePassed)
+        {throw "Unowned/unacknowledged/live archive retained: $kind"}
+        $eligibility+=@{kind=$kind;rejected=$true;manifest=$rejected}
+    }
     $metadataFault=Join-Path $Output 'metadata-copy-fault\evidence'
     $null=New-Item -ItemType Directory -Path $metadataFault
     [IO.File]::WriteAllText((Join-Path $metadataFault 'good.log'),'closed diagnostic must survive copy failure')
@@ -258,6 +335,8 @@ try
         diagnosticsZip=$zip;rawZip=$rawZip;outputCorpusFiles=119;allOutputBytesEqual=$true;allMetadataZipBytesEqual=$true;all119RawZipBytesEqual=$true;hiddenObjIncluded=$true
         scratchLockInArchives=$false;negativeUnfinalizedRaw=$noFinal;copyFailureExplicit=$partial.errors
         compoundCopyAndReportingFailure=$compoundProof
+        provisionalMonitorFailure=@{passed=$true;manifest=$provisionalResult;originalErrorPreserved=$true;archiveBytesEqual=$true;stageFailed=$provisionalFailed}
+        invalidArchiveEligibility=$eligibility
         actualRecordings=0;servicesStarted=0;oldScratchGuidUsed=$false} (Join-Path $Output 'test-result.json')
 }
 finally

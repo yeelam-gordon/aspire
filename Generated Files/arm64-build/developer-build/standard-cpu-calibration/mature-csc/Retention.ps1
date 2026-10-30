@@ -1,4 +1,5 @@
 . (Join-Path $PSScriptRoot 'Failure.ps1')
+. (Join-Path $PSScriptRoot 'Monitor.ps1')
 
 function Copy-MatureClosedFile([string]$Source,[string]$Destination)
 {
@@ -34,6 +35,7 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
     $reportingErrors=[Collections.Generic.List[object]]::new()
     $rawFiles=[Collections.Generic.List[string]]::new()
     $finalized=$false
+    $recordingComplete=$false
     $rawState='missing own successful start/stop receipt'
 
     function Add-RetentionError([Management.Automation.ErrorRecord]$Record,[string]$Phase)
@@ -88,8 +90,9 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
     }
     catch{Add-RetentionError $_ 'metadata-copy'}
 
-    # A filename is not finalization. Only this recorded owned session's
-    # successful, non-timeout start AND stop authorizes copying its raw archive.
+    # Ownership + acknowledged export allows retention, even when later monitor
+    # failure makes the protocol incomplete. Never discard such a closed archive
+    # or promote provisional evidence to successful profiling.
     $capture=Join-Path $EvidenceRoot 'measurements\capture'
     $sessionPath=Join-Path $capture 'session-final.json'
     try
@@ -99,22 +102,63 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
             $state=Get-Content -LiteralPath $sessionPath -Raw|ConvertFrom-Json
             $guid=[Guid]::Empty
             $archive=Join-Path $capture 'mature-csc.diagsession'
-            $owned=$state.started -and $state.stopAttempted -and [Guid]::TryParse($state.sessionId,[ref]$guid) -and
-                $state.startReceipt.exitCode -eq 0 -and -not$state.startReceipt.timedOut -and $state.startReceipt.outputComplete -and
+            $owned=$state.started -and $state.startReceipt.ready -and $state.startReceipt.monitorAliveAtReady -and
+                $state.startReceipt.sessionId -ceq $state.sessionId -and
+                $state.startReceipt.targetIdentity.pid -eq $state.identity.pid -and
+                $state.startReceipt.targetIdentity.startTicks -eq $state.identity.startTicks -and
+                $state.startReceipt.targetIdentity.executablePath -ceq $state.identity.executablePath -and
+                $state.stopAttempted -and $state.stopAcknowledged -and [Guid]::TryParse($state.sessionId,[ref]$guid) -and
                 $state.stopReceipt.exitCode -eq 0 -and -not$state.stopReceipt.timedOut -and $state.stopReceipt.outputComplete -and
                 $state.startReceipt.arguments[0] -ceq 'start' -and $state.startReceipt.arguments[1] -ceq $state.sessionId -and
                 $state.startReceipt.arguments -ccontains "/attach:$($state.identity.pid)" -and
+                $state.startReceipt.arguments -ccontains '/monitor' -and
                 $state.stopReceipt.arguments[0] -ceq 'stop' -and $state.stopReceipt.arguments[1] -ceq $state.sessionId -and
                 $state.stopReceipt.arguments -ccontains "/output:$archive" -and
                 [IO.Path]::GetFullPath($state.output) -ceq $archive -and
                 $state.identity.pid -gt 0 -and $state.identity.startTicks -gt 0
             if(-not$owned){throw 'Raw archive has no valid owned successful start/stop/finalized-output proof.'}
+            if(-not(Test-MatureStatusText (Get-Content (Join-Path $capture 'start.stdout-prefix.log') -Raw) $state.sessionId 'Running') -or
+                -not(Test-MatureStatusText (Get-Content (Join-Path $capture 'stop.stdout.log') -Raw) $state.sessionId 'Stopped'))
+            {throw 'Exact owned Running/Stopped transcript ACK missing.'}
             if(-not(Test-Path -LiteralPath $archive) -or (Get-Item -LiteralPath $archive -Force).Length -eq 0){throw 'Finalized raw archive missing/empty.'}
             $destination=Join-Path $raw 'capture\mature-csc.diagsession'
-            Copy-MatureClosedFile $archive $destination
+            # Keep a read-only sharing lock across ZIP validation AND copying:
+            # a concurrent writer/live blob cannot qualify as a closed archive.
+            $input=[IO.FileStream]::new($archive,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            try
+            {
+                $zip=[IO.Compression.ZipArchive]::new($input,[IO.Compression.ZipArchiveMode]::Read,$true)
+                try
+                {
+                    if($zip.Entries.Count -eq 0){throw 'Owned archive ZIP is empty.'}
+                    foreach($entry in $zip.Entries)
+                    {
+                        $stream=$entry.Open()
+                        try{$stream.CopyTo([IO.Stream]::Null)}finally{$stream.Dispose()}
+                    }
+                    Copy-MatureClosedFile $archive $destination
+                }
+                finally{$zip.Dispose()}
+            }
+            finally{$input.Dispose()}
             $rawFiles.Add('capture\mature-csc.diagsession')
             $finalized=$true
-            $rawState='owned successfully finalized archive staged as a closed copy'
+            $monitor=$state.monitorReceipt
+            $monitorComplete=$monitor.pid -eq $state.startReceipt.pid -and $monitor.birthTicks -eq $state.startReceipt.birthTicks -and
+                $monitor.executable -ceq $state.startReceipt.executable -and
+                ($monitor.arguments -join "`n") -ceq ($state.startReceipt.arguments -join "`n") -and
+                $monitor.exitCode -eq 0 -and -not$monitor.timedOut -and $monitor.outputComplete
+            $protocolPath=Join-Path $EvidenceRoot 'measurements\final-state.json'
+            $gatePath=Join-Path $capture 'qualified-gate.json'
+            if($monitorComplete -and (Test-Path $protocolPath) -and (Test-Path $gatePath))
+            {
+                $protocol=Get-Content $protocolPath -Raw|ConvertFrom-Json
+                $gate=Get-Content $gatePath -Raw|ConvertFrom-Json
+                $recordingComplete=$null -eq $protocol.failure -and $protocol.completedCases -eq 24 -and
+                    $protocol.secondaryFailures.Count -eq 0 -and $protocol.reportingFailures.Count -eq 0 -and
+                    $protocol.restorationPassed -and $gate.qualifiedFileAndSampleGate
+            }
+            $rawState=if($recordingComplete){'owned closed archive; monitor/work/qualified gates complete'}else{'PROVISIONAL owned closed archive retained; monitor/protocol/quality incomplete or failed'}
         }
     }
     catch{$rawState=$_.Exception.Message;Add-RetentionError $_ 'finalized-raw-copy'}
@@ -144,10 +188,13 @@ function Stage-MatureEvidence([string]$EvidenceRoot,[string]$StageRoot)
         }
         catch{Add-RetentionError $_ "closed-output-$name"}
     }
+    if($finalized -and $errors.Count -gt 0)
+    {$recordingComplete=$false;$rawState='PROVISIONAL owned closed archive retained; retention errors present'}
     $result=@{metadataRoot=$metadata;rawRoot=$raw;metadataFiles=@($copied.ToArray());excludedWithoutTraversal=@($omitted.ToArray())
         errors=@($errors.ToArray());reportingErrors=@($reportingErrors.ToArray());finalizedRawStaged=$finalized;rawState=$rawState
+        rawRecordingComplete=$recordingComplete;provisionalRawStaged=$finalized -and -not$recordingComplete
         safeRawFiles=@($rawFiles.ToArray());rawFilesAvailable=$rawFiles.Count -gt 0
-        stagePassed=$errors.Count -eq 0 -and $finalized
+        stagePassed=$errors.Count -eq 0 -and $recordingComplete
         safety='Only closed copied diagnostics, owned finalized archive and explicit manifested bin/obj outputs; no scratch/cache/home/checkout traversal.'}
     Write-MatureClosedJson $result (Join-Path $metadata 'retention-manifest.json')
     return $result
