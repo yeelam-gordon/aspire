@@ -1,35 +1,45 @@
 name: Compare ARM64 developer builds
-run-name: Diagnose ordinary Hosting compiler CPU (single cold/no-op/edit)
+run-name: Paired ordinary Hosting compiler TieredPGO policy (B-C-C-B)
 
-# SOURCE-ONLY candidate for the existing registered manual workflow path:
-# .github/workflows/compare-arm64-developer-build.yml
-# No PR/push/schedule trigger, no run_* gate, no profiler/native capture.
+# Existing registered manual workflow path; no PR/push/schedule trigger.
+# Dispatch remains subject to a separate parent-owned long-session/audit gate.
 on:
   workflow_dispatch:
-    inputs:
-      observe_idle:
-        description: Add one 500 ms unbuilt server-background observation; never subtract it
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 jobs:
-  compiler_cpu:
+  paired_pgo:
     if: >-
       github.repository == 'yeelam-gordon/aspire' &&
-      github.ref == 'refs/heads/perf/arm64-compiler-cpu-counters'
-    name: Compiler CPU (${{ matrix.runner }})
+      github.ref == 'refs/heads/perf/arm64-compiler-pgo'
+    name: Paired compiler policy (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        # Two hosts, not independent arm jobs: all four arms share each host.
         runner: [windows-11-vs2026-arm, macos-latest]
     steps:
-      # Pins, native runner labels and project-scoped bootstrap are unchanged
-      # from the successful corrected primary harness (run 40883755604).
+      - name: Precreate evidence and ownership epoch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $PWD 'compiler-pgo-results'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          $started = [DateTime]::UtcNow.ToString('O')
+          "PAIRED_JOB_START_UTC=$started" >> $env:GITHUB_ENV
+          @{
+            jobStartUtc = $started
+            eventSource = $env:GITHUB_SHA
+            imageOS = $env:ImageOS
+            imageVersion = $env:ImageVersion
+            status = 'pre-bootstrap; runner validation not yet established'
+          } | ConvertTo-Json | Set-Content (Join-Path $evidence 'job-start.json')
+
+      # Existing immutable action pins are unchanged.
       - name: Checkout instrumentation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,29 +53,41 @@ jobs:
           path: product
           persist-credentials: false
 
-      - name: Restore repository toolchain
+      - name: Restore fresh native repository toolchain
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $root = Join-Path $PWD 'product'
+          $evidence = Join-Path $PWD 'compiler-pgo-results'
+          if (Test-Path (Join-Path $root '.dotnet')) {
+            throw 'Private SDK must be fresh for job-epoch ownership.'
+          }
           if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
               [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString() -ne 'Arm64') {
-            throw 'Both measurements require native ARM64 processes and OS.'
+            throw 'Both policy arms require native ARM64 processes and OS.'
           }
-          $root = Join-Path $PWD 'product'
-          $evidence = Join-Path $PWD 'compiler-cpu-results'
-          New-Item -ItemType Directory -Path $evidence | Out-Null
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
+          . (Join-Path $helper 'Paired-Helpers.ps1')
+          $source = (& git -C $root rev-parse HEAD).Trim()
+          if (-not (Test-PairedDispatch $env:GITHUB_REPOSITORY $env:GITHUB_REF $env:GITHUB_EVENT_NAME $source)) {
+            throw 'Fork/manual/ref/product guard failed.'
+          }
           @{
-            productSource = (& git -C $root rev-parse HEAD)
-            instrumentationSource = (& git -C (Join-Path $PWD 'instrumentation') rev-parse HEAD)
-            eventSource = $env:GITHUB_SHA
-            imageOS = $env:ImageOS
-            imageVersion = $env:ImageVersion
-            interpretation = 'Single diagnostic sample per case, not throughput or population parity.'
+            productSource = $source
+            instrumentationSource = (& git -C (Join-Path $PWD 'instrumentation') rev-parse HEAD).Trim()
+            bootstrap = 'Project-scoped repository restore; excluded from timing.'
+            jobStartUtc = $env:PAIRED_JOB_START_UTC
           } | ConvertTo-Json | Set-Content (Join-Path $evidence 'provenance.json')
           $entry = if ($IsWindows) { 'restore.cmd' } else { 'restore.sh' }
-          # Keep the corrected primary harness's absolute project path: Arcade
-          # evaluates explicit project paths from its own tooling project.
-          $project = Join-Path $root 'src/Aspire.Hosting/Aspire.Hosting.csproj'
+          # Preserve P29's macOS fix: Arcade resolves explicit projects from its
+          # tooling project, so this path MUST be absolute.
+          $project = Join-Path $root ([IO.Path]::Combine('src', 'Aspire.Hosting', 'Aspire.Hosting.csproj'))
+          @{
+            executable = Join-Path $root $entry
+            arguments = @('-configuration', 'Debug', '-projects', $project)
+            workingDirectory = $root
+            includedInTiming = $false
+          } | ConvertTo-Json | Set-Content (Join-Path $evidence 'restore-command.json')
           Push-Location $root
           try {
             & (Join-Path $root $entry) -configuration Debug -projects $project *> (Join-Path $evidence 'toolchain-restore.log')
@@ -73,53 +95,51 @@ jobs:
           }
           finally { Pop-Location }
 
-      - name: Source fixtures and native SDK preflight
+      - name: Pure source fixtures
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $PWD 'product'
-          $helper = Join-Path $PWD 'instrumentation/Generated Files/arm64-build/developer-build/compiler-cpu-counters'
-          $evidence = Join-Path $PWD 'compiler-cpu-results'
-          & (Join-Path $helper 'Test-CompilerIdentity.ps1') -ResultsDirectory (Join-Path $evidence 'source-checks')
-          & (Join-Path $helper 'Measure-CompilerCpu.ps1') -RepositoryRoot $root -ResultsDirectory (Join-Path $evidence 'preflight') -PreflightOnly
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
+          & (Join-Path $helper 'Test-PairedPgo.ps1') -ResultsDirectory (Join-Path $PWD ([IO.Path]::Combine('compiler-pgo-results', 'source-checks')))
 
-      - name: Build offline binlog reader outside measurement
+      - name: Build offline reader outside measurement
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $PWD 'product'
-          $helper = Join-Path $PWD 'instrumentation/Generated Files/arm64-build/developer-build/compiler-cpu-counters'
-          $evidence = Join-Path $PWD 'compiler-cpu-results'
-          $dotnet = Join-Path $root $(if ($IsWindows) { '.dotnet/dotnet.exe' } else { '.dotnet/dotnet' })
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
+          $dotnet = Join-Path (Join-Path $root '.dotnet') $(if ($IsWindows) { 'dotnet.exe' } else { 'dotnet' })
+          $readerProject = Join-Path $helper ([IO.Path]::Combine('binlog-reader', 'Reader.csproj'))
+          $evidence = Join-Path $PWD 'compiler-pgo-results'
+          @{
+            executable = $dotnet
+            arguments = @('build', $readerProject, '--configuration', 'Debug', '--nologo', '/p:UseSharedCompilation=false', '/nr:false')
+            workingDirectory = $root
+            includedInTiming = $false
+          } | ConvertTo-Json | Set-Content (Join-Path $evidence 'reader-command.json')
           Push-Location $root
           try {
-            # These flags affect only the tiny standalone replay utility and
-            # leave no compiler server to contaminate the cold product build.
-            & $dotnet build (Join-Path $helper 'binlog-reader/Reader.csproj') --configuration Debug --nologo /p:UseSharedCompilation=false /nr:false *> (Join-Path $evidence 'reader-build.log')
-            if ($LASTEXITCODE -ne 0) { throw 'Offline binlog reader build failed.' }
+            # Only the tiny standalone replay utility uses these flags.
+            & $dotnet build $readerProject --configuration Debug --nologo /p:UseSharedCompilation=false /nr:false *> (Join-Path $evidence 'reader-build.log')
+            if ($LASTEXITCODE -ne 0) { throw 'Offline reader setup build failed.' }
           }
           finally { Pop-Location }
 
-      - name: Diagnose three ordinary Hosting commands
+      - name: One paired block on this host
         shell: pwsh
-        env:
-          OBSERVE_IDLE: ${{ inputs.observe_idle }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $PWD 'product'
-          $helper = Join-Path $PWD 'instrumentation/Generated Files/arm64-build/developer-build/compiler-cpu-counters'
-          $results = Join-Path $PWD 'compiler-cpu-results/measurements'
-          $idle = if ($env:OBSERVE_IDLE -eq 'true') { 500 } else { 0 }
-          & (Join-Path $helper 'Measure-CompilerCpu.ps1') -RepositoryRoot $root -ResultsDirectory $results -IdleObservationMilliseconds $idle
-          & (Join-Path $helper 'Verify-Counters.ps1') -ResultsDirectory $results
+          $helper = Join-Path $PWD ([IO.Path]::Combine('instrumentation', 'Generated Files', 'arm64-build', 'developer-build', 'compiler-pgo-paired'))
+          & (Join-Path $helper 'Measure-PairedPgo.ps1') `
+            -RepositoryRoot (Join-Path $PWD 'product') `
+            -ResultsDirectory (Join-Path $PWD ([IO.Path]::Combine('compiler-pgo-results', 'measurements'))) `
+            -JobStartUtc ([DateTime]::Parse($env:PAIRED_JOB_START_UTC).ToUniversalTime())
 
-      - name: Upload compiler counter evidence
+      - name: Upload paired policy evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: compiler-cpu-${{ matrix.runner }}
+          name: compiler-pgo-${{ matrix.runner }}
           path: |
-            compiler-cpu-results/
+            compiler-pgo-results/
             product/artifacts/log/
           if-no-files-found: error
           retention-days: 7
