@@ -29,6 +29,32 @@ Filesystem/NuGet caches are warm: "cold" means cleaned outputs and fresh compile
 These node lifetime controls are **not pool-local ordinary developer timings**.
 The job has a 30-minute bound, no alternate pool or automatic requeue/retry.
 
+The workflow explicitly passes `-EditCount 8` and always requires forty
+completed cases. The harness parameter defaults to eight and accepts only
+`1` or `8`. A separately authorized local smoke uses
+`-EditCount 1 -LocalSmoke`, retaining all four arms, both untimed policy warmups,
+and every quality/output/native-identity/cleanup/restoration gate, but requiring
+twelve cases (cold/no-op/one edit per arm). It makes no performance benefit
+claim. Local smoke rejects GitHub Actions and any hosted repository/ref/event
+metadata; hosted invocation rejects a reduced edit count. No hosted identity
+needs to be fabricated to exercise the harness locally.
+
+Do not compile the reader or run local smoke while another worker owns timed
+work. After explicit coordinator host release, the prospective smoke may reuse
+the existing source-clean `06efc928e31486923754398007f4f78003e04ee3` checkout at
+`Q:\aspire-perf-compiler-pgo` only after confirming no preexisting private SDK
+processes and restored source/config. Record a fresh UTC ownership epoch
+**before** reader setup, which alone uses non-shared/non-reused build flags.
+Pass that epoch as `-JobStartUtc` to the harness. Preserve actual failures and
+stop; do not globally shut down servers or create another SDK copy/worktree.
+Reader APIs and Windows native behavior need actual smoke proof; macOS runtime
+calls remain unverified even if the source fixtures pass.
+
+Loaded macOS runtime libraries use a separate typed header check requiring thin
+ARM64 `MH_DYLIB` (6). P29's unchanged compiler/SDK executable check still
+requires `MH_EXECUTE` (2). Universal/fat and truncated headers remain rejected;
+source fixtures for these distinctions are not actual macOS API validation.
+
 Timed commands are ordinary `dotnet build src/Aspire.Hosting/Aspire.Hosting.csproj
 --configuration Debug --no-restore --nologo /bl:<case>/build.binlog`.
 Restore and clean are excluded. Only the tiny offline reader setup uses

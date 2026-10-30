@@ -2,7 +2,9 @@
 param(
     [Parameter(Mandatory)][string]$RepositoryRoot,
     [Parameter(Mandatory)][string]$ResultsDirectory,
-    [Parameter(Mandatory)][DateTime]$JobStartUtc
+    [Parameter(Mandatory)][DateTime]$JobStartUtc,
+    [ValidateSet(1, 8)][int]$EditCount = 8,
+    [switch]$LocalSmoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,11 +17,13 @@ $RepositoryRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $sdkRoot = Join-Path $RepositoryRoot '.dotnet'
 $dotnet = Join-Path $sdkRoot $(if ($IsWindows) { 'dotnet.exe' } else { 'dotnet' })
 $source = (& git -C $RepositoryRoot rev-parse HEAD).Trim()
-if (-not (Test-PairedDispatch $env:GITHUB_REPOSITORY $env:GITHUB_REF $env:GITHUB_EVENT_NAME $source) -or
+if (-not (Test-PairedInvocation $env:GITHUB_REPOSITORY $env:GITHUB_REF $env:GITHUB_EVENT_NAME $source `
+    $EditCount $LocalSmoke.IsPresent ($env:GITHUB_ACTIONS -eq 'true')) -or
     @(& git -C $RepositoryRoot status --porcelain).Count)
 {
-    throw 'Fork/manual/ref/exact clean product source guard failed.'
+    throw 'Hosted fork/manual/ref/eight-edit or explicit local one-edit smoke/exact clean source guard failed.'
 }
+$expectedCases = 4 * (2 + $EditCount)
 if ($JobStartUtc.ToUniversalTime() -gt [DateTime]::UtcNow -or $JobStartUtc -lt [DateTime]::UtcNow.AddMinutes(-30))
 {
     throw 'Invalid job ownership epoch.'
@@ -272,13 +276,7 @@ function Get-PairedProof([string]$Arm)
             {
                 $bytes = [byte[]]::new([int][math]::Min(4096, $stream.Length))
                 $stream.ReadExactly($bytes, 0, $bytes.Length)
-                $header = Get-NativeImageHeader $bytes
-                # The shared helper deliberately marks Mach-O dylibs as
-                # non-executable. Validate their CPU type, not that apphost bit.
-                if (-not $header.arm64 -and -not ($header.format -eq 'Mach-O64-thin' -and $header.cpuType -eq '0x0100000C'))
-                {
-                    throw 'Loaded runtime is not thin native ARM64.'
-                }
+                $header = Get-PairedRuntimeImageHeader $bytes $IsWindows
                 @{ path = $library; header = $header }
             }
             finally { $stream.Dispose() }
@@ -313,7 +311,9 @@ try
         os = [Runtime.InteropServices.RuntimeInformation]::OSDescription; sdk = $sdkVersion
         observerPid = $PID; observerRuntime = [Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
         host = Get-NativeImageIdentity $dotnet; order = @('baseline','candidate','candidate','baseline')
-        cases = @('cold','noop') + @(1..8 | ForEach-Object { "edit$_" })
+        cases = @('cold','noop') + @(1..$EditCount | ForEach-Object { "edit$_" })
+        editCount = $EditCount; expectedCases = $expectedCases
+        invocation = if ($LocalSmoke) { 'local-one-edit-smoke; no performance benefit claims' } else { 'hosted-fixed-eight-edit-block' }
         timing = 'Command start-to-exit wall; Csc task elapsed sum is work wall, NEVER CPU.'
         setup = 'One untimed clean/build per policy; clean and private-node reset excluded per arm.'
         cache = 'Filesystem/NuGet caches warm; cold means fresh compiler and cleaned outputs, not machine cold.'
@@ -337,7 +337,7 @@ try
         Reset-PrivateProcesses
         $birthAfter = [DateTime]::UtcNow.Ticks
         $server = $null
-        $cases = if ($warmup) { @('cold') } else { @('cold','noop') + @(1..8 | ForEach-Object { "edit$_" }) }
+        $cases = if ($warmup) { @('cold') } else { @('cold','noop') + @(1..$EditCount | ForEach-Object { "edit$_" }) }
         foreach ($case in $cases)
         {
             if ($case.StartsWith('edit'))
@@ -466,10 +466,11 @@ finally
         sourceHead = (& git -C $RepositoryRoot rev-parse HEAD).Trim()
         sourceStatus = @(& git -C $RepositoryRoot status --porcelain); configChecks = $configChecks
         failure = $failure; cleanupFailed = $cleanupFailed; cleanupError = $cleanupError
-        completedCases = $receipts.Count; comparisons = @($comparisons.ToArray())
+        completedCases = $receipts.Count; expectedCases = $expectedCases; editCount = $EditCount
+        localSmoke = $LocalSmoke.IsPresent; comparisons = @($comparisons.ToArray())
         processIdentities = @($observed.Values); confirmedExited = @($confirmedExited.Keys) }
     Write-PairedJson $state (Join-Path $ResultsDirectory 'final-state.json')
-    if ($failure -or $cleanupFailed -or $receipts.Count -ne 40 -or -not $state.sourceBytesRestored -or
+    if ($failure -or $cleanupFailed -or $receipts.Count -ne $expectedCases -or -not $state.sourceBytesRestored -or
         -not $state.sourceTimestampRestored -or $state.sourceStatus.Count -or
         @($configChecks | Where-Object { -not $_.bytesUnchanged -or -not $_.timestampUnchanged }).Count)
     {

@@ -131,7 +131,8 @@ jobs:
           & (Join-Path $helper 'Measure-PairedPgo.ps1') `
             -RepositoryRoot (Join-Path $PWD 'product') `
             -ResultsDirectory (Join-Path $PWD ([IO.Path]::Combine('compiler-pgo-results', 'measurements'))) `
-            -JobStartUtc ([DateTime]::Parse($env:PAIRED_JOB_START_UTC).ToUniversalTime())
+            -JobStartUtc ([DateTime]::Parse($env:PAIRED_JOB_START_UTC).ToUniversalTime()) `
+            -EditCount 8
 
       - name: Upload paired policy evidence
         if: always()

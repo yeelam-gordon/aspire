@@ -47,6 +47,10 @@ assert "$root = Join-Path $PWD 'product'" in bootstrap
 assert "$project = Join-Path $root" in bootstrap
 assert "-projects $project" in bootstrap
 assert "jobStartUtc = $env:PAIRED_JOB_START_UTC" in bootstrap
+measurement = next(s["run"] for s in steps if s["name"] == "One paired block on this host")
+assert re.search(r"(?m)^\s*-EditCount 8\s*$", measurement)
+assert measurement.count("-EditCount") == 1
+assert "-LocalSmoke" not in measurement
 upload = steps[-1]
 assert upload["if"] == "always()"
 assert upload["with"]["if-no-files-found"] == "error"
@@ -59,8 +63,13 @@ baseline = subprocess.check_output(
 )
 assert re.findall(r"uses:\s*(\S+)", text) == re.findall(r"uses:\s*(\S+)", baseline)
 harness = (pathlib.Path(__file__).parent / "Measure-PairedPgo.ps1").read_text(encoding="utf-8")
-assert "Test-PairedDispatch $env:GITHUB_REPOSITORY $env:GITHUB_REF $env:GITHUB_EVENT_NAME $source" in harness
+assert "Test-PairedInvocation $env:GITHUB_REPOSITORY $env:GITHUB_REF $env:GITHUB_EVENT_NAME $source" in harness
+assert re.search(r"\[ValidateSet\(1,\s*8\)\]\[int\]\$EditCount\s*=\s*8", harness)
+assert "$expectedCases = 4 * (2 + $EditCount)" in harness
+assert "$receipts.Count -ne $expectedCases" in harness
+assert harness.count("1..$EditCount") == 2
 assert "Get-NativeImageIdentity" in harness
+assert "Get-PairedRuntimeImageHeader $bytes $IsWindows" in harness
 assert "ConvertFrom-PairedMacState" in harness
 assert "Test-PairedAbsence" in harness
 assert not re.search(r"build-server\s+shutdown|Stop-Process\s+-Name|taskkill", harness, re.I)

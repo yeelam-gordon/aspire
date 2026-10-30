@@ -67,6 +67,61 @@ Check 'Fork/manual/ref/product guard permits only owned exact source' {
     Require (-not (Test-PairedDispatch $repo $ref 'pull_request' $sha))
     Require (-not (Test-PairedDispatch $repo $ref 'workflow_dispatch' '891d5a172210ae8fa1c7b1ea31ff86f12dc0a838'))
 }
+Check 'Harness EditCount binding defaults to eight and accepts only one or eight' {
+    $tokens = $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot 'Measure-PairedPgo.ps1'), [ref]$tokens, [ref]$errors)
+    Require ($errors.Count -eq 0)
+    # Bind the actual harness parameter block, without executing its body or
+    # reading/touching any product root. This exercises ValidateSet itself.
+    $bind = [scriptblock]::Create("$($ast.ParamBlock.Extent.Text)`nreturn `$EditCount")
+    $required = @{ RepositoryRoot = 'unused'; ResultsDirectory = 'unused'; JobStartUtc = [DateTime]::UtcNow }
+    Require ((& $bind @required) -eq 8)
+    Require ((& $bind @required -EditCount 1) -eq 1)
+    Require ((& $bind @required -EditCount 8) -eq 8)
+    foreach ($invalid in @(0,2,7,9,-1))
+    {
+        Reject { & $bind @required -EditCount $invalid }
+    }
+}
+Check 'Local smoke cannot become hosted reduced work or bypass exact source' {
+    $sha = '06efc928e31486923754398007f4f78003e04ee3'
+    Require (Test-PairedInvocation '' '' '' $sha 1 $true $false)
+    Require (-not (Test-PairedInvocation '' '' '' $sha 8 $true $false))
+    Require (-not (Test-PairedInvocation '' '' '' $sha 1 $false $false))
+    Require (-not (Test-PairedInvocation '' '' '' $sha 1 $true $true))
+    Require (-not (Test-PairedInvocation '' '' '' 'wrong-source' 1 $true $false))
+    foreach ($metadata in @(
+        @('yeelam-gordon/aspire','',''),
+        @('','refs/heads/perf/arm64-compiler-pgo',''),
+        @('','','workflow_dispatch')))
+    {
+        Require (-not (Test-PairedInvocation $metadata[0] $metadata[1] $metadata[2] $sha 1 $true $false))
+    }
+    Require (Test-PairedInvocation 'yeelam-gordon/aspire' 'refs/heads/perf/arm64-compiler-pgo' 'workflow_dispatch' $sha 8 $false $true)
+    Require (-not (Test-PairedInvocation 'yeelam-gordon/aspire' 'refs/heads/perf/arm64-compiler-pgo' 'workflow_dispatch' $sha 1 $false $true))
+    Require (-not (Test-PairedInvocation 'yeelam-gordon/aspire' 'refs/heads/perf/arm64-compiler-pgo' 'workflow_dispatch' $sha 1 $true $true))
+}
+Check 'Typed ARM64 Mach-O dylib is not an executable and universal policy stays strict' {
+    $bytes = [byte[]]::new(32)
+    [BitConverter]::GetBytes([uint32]0xFEEDFACFul).CopyTo($bytes, 0)
+    [BitConverter]::GetBytes([uint32]0x0100000C).CopyTo($bytes, 4)
+    [BitConverter]::GetBytes([uint32]6).CopyTo($bytes, 12)
+    $library = Get-PairedRuntimeImageHeader $bytes $false
+    Require ($library.arm64 -and $library.machOFileType -eq 6 -and $library.imageRole -ceq 'runtime-library')
+    Require (-not (Get-NativeImageHeader $bytes).arm64)
+    Reject { Get-PairedRuntimeImageHeader $bytes $true }
+    [BitConverter]::GetBytes([uint32]2).CopyTo($bytes, 12)
+    Require ((Get-NativeImageHeader $bytes).arm64)
+    Reject { Get-PairedRuntimeImageHeader $bytes $false }
+    [BitConverter]::GetBytes([uint32]6).CopyTo($bytes, 12)
+    [BitConverter]::GetBytes([uint32]0x01000007).CopyTo($bytes, 4)
+    Reject { Get-PairedRuntimeImageHeader $bytes $false }
+    $fat = [byte[]]::new(32)
+    $fat[0] = 0xca; $fat[1] = 0xfe; $fat[2] = 0xba; $fat[3] = 0xbe
+    Reject { Get-PairedRuntimeImageHeader $fat $false }
+    Reject { Get-PairedRuntimeImageHeader ([byte[]]@(0xcf,0xfa,0xed,0xfe)) $false }
+}
 Check 'Native Mac state parser retains zombie/start/path without liveness inference' {
     $parsed = ConvertFrom-PairedMacState ' 5673 3992 Z Fri Oct 30 01:23:45 2026 /owned path/.dotnet/VBCSCompiler' 5673
     Require ($parsed.state -ceq 'Z' -and $parsed.parentPid -eq 3992)

@@ -86,6 +86,21 @@ function Test-PairedDispatch([string]$Repository, [string]$Ref, [string]$Event, 
         $Source -ceq '06efc928e31486923754398007f4f78003e04ee3'
 }
 
+function Test-PairedInvocation([string]$Repository, [string]$Ref, [string]$Event,
+    [string]$Source, [int]$EditCount, [bool]$LocalSmoke, [bool]$GitHubActions)
+{
+    if ($LocalSmoke)
+    {
+        # Local smoke must not fabricate a hosted event or bypass the hosted
+        # eight-edit protocol. The exact product source gate remains mandatory.
+        return $EditCount -eq 1 -and -not $GitHubActions -and
+            [string]::IsNullOrEmpty($Repository) -and [string]::IsNullOrEmpty($Ref) -and
+            [string]::IsNullOrEmpty($Event) -and $Source -ceq '06efc928e31486923754398007f4f78003e04ee3'
+    }
+
+    return $EditCount -eq 8 -and (Test-PairedDispatch $Repository $Ref $Event $Source)
+}
+
 function ConvertFrom-PairedMacState([string]$Line, [int]$ExpectedPid)
 {
     # Native diagnostic shape (lstart is five fields, command may contain spaces):
@@ -120,4 +135,27 @@ function Get-PairedPendingIdentities($Observed, $Current, $ConfirmedExited)
         if (-not $ConfirmedExited.ContainsKey($key)) { $pending[$key] = $identity }
     }
     return @($pending.Values)
+}
+
+function Get-PairedRuntimeImageHeader([byte[]]$Bytes, [bool]$Windows)
+{
+    $header = Get-NativeImageHeader $Bytes
+    if ($Windows)
+    {
+        if ($header.format -ne 'PE' -or -not $header.arm64) { throw 'Runtime library must be native ARM64 PE.' }
+        return $header
+    }
+
+    # P29's executable helper intentionally requires MH_EXECUTE (2). Loaded
+    # libcoreclr/libclrjit/libhostpolicy are MH_DYLIB (6), not apphosts; keep
+    # their role check separate without accepting universal/fat images.
+    # https://github.com/apple-oss-distributions/xnu/blob/main/EXTERNAL_HEADERS/mach-o/loader.h
+    if ($header.format -ne 'Mach-O64-thin' -or $header.cpuType -ne '0x0100000C' -or
+        [BitConverter]::ToUInt32($Bytes, 12) -ne 6)
+    {
+        throw 'Runtime library must be a thin native ARM64 MH_DYLIB image.'
+    }
+
+    return @{ format = $header.format; cpuType = $header.cpuType; arm64 = $true
+        machOFileType = 6; imageRole = 'runtime-library' }
 }
