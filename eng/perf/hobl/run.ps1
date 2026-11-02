@@ -46,6 +46,7 @@ $result = [ordered]@{
     totalDeadlineUtc = $deadlines.total.ToString('o')
     workloadDeadlineUtc = $deadline.ToString('o')
     cleanupReserveSeconds = $deadlines.cleanupSeconds
+    timingContract = 'Windows process start/exit lifetime; macOS upstream unix-time real; supervisor wall recorded separately'
 }
 $result.adapterSnapshot = Save-HoblAdapterSnapshot $runRoot
 $childEnv = @{
@@ -332,11 +333,13 @@ try {
             $iteration.phases += $record
             if ((Get-Content $sentinel -Raw).Trim() -ne $token -or (Get-Content $outsideSentinel -Raw).Trim() -ne $token) { throw 'Source/outside sentinel altered.' }
             if ($phase.timed) {
-                $iteration.scenarioRuntimeSeconds = $record.wallSeconds
+                $iteration.scenarioRuntimeSeconds = $record.processWallSeconds
+                $iteration.timingKind = 'process-start-exit-lifetime'
                 if ($IsMacOS) {
                     $timing = Get-HoblUnixTime $extra.TimingFile
                     $iteration.scenarioRuntimeSeconds = $timing.real
                     $iteration.unixTime = $timing
+                    $iteration.timingKind = 'upstream-unix-time-real'
                 }
                 # Minimal verbosity can omit csc command lines. Also require fresh intermediate
                 # compiler outputs and bin artifacts, so exit 0 from an empty solution cannot pass.

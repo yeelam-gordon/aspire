@@ -112,8 +112,16 @@ It happens only in the owned clone, with source status/diff captured, never by
 changing the real checkout's `global.json`, package manifests or NuGet config.
 No validation is disabled to pass.
 
-Only the build child is timed. Windows records unrounded monotonic wall seconds;
-Mac retains upstream `/usr/bin/time -p` real/user/sys output. Adapter startup and
+Only the build child is scored. Windows uses the child's kernel-reported
+`processStartedUtc`/`processExitedUtc` lifetime (`processWallSeconds`); Mac retains
+upstream `/usr/bin/time -p` real/user/sys output. Command records separately retain
+the supervisor's monotonic `wallSeconds`, including observation delay. A storage
+scan can outlive an already-exited child, so supervisor time must not become the
+Windows scenario score. Runs made before this timing correction are a different
+measurement contract and are not an optimization before/after baseline.
+Kernel timestamps use system wall time; nonpositive/nonfinite scores are rejected.
+Supervision can still perturb execution and is not full lab isolation.
+Adapter startup and
 setup/clean/restore are outside the timed interval. No all-native compiler claim
 is made: native host/PowerShell are verified, other tools and x64 protoc may differ.
 

@@ -90,12 +90,44 @@ try {
     Assert-True ((Get-Content $record.stdout -Raw).Trim() -eq 'child only') 'Child environment not applied.'
     Assert-True ((Get-Content $record.stderr -Raw).Trim() -eq 'stderr retained') 'Stderr missing.'
     Assert-True ($env:HOBL_FIXTURE -ne 'child only') 'Parent environment mutated.'
+    $originalStorageGetter = (Get-Command Get-HoblBytes -CommandType Function).ScriptBlock
+    $script:timingKernel = $null
+    $timingStop = Join-Path $owned 'timing-stop.txt'
+    try {
+        function Get-HoblBytes {
+            param([string]$Root)
+            if ($null -eq $script:timingKernel) {
+                $child = (Get-Variable process -Scope 1 -ErrorAction Stop).Value
+                Set-Content -LiteralPath $timingStop 'stop'
+                if (-not $child.WaitForExit(10000)) { throw 'Timing fixture child did not exit.' }
+                $script:timingKernel = @{
+                    pid = $child.Id
+                    seconds = ($child.ExitTime.ToUniversalTime() - $child.StartTime.ToUniversalTime()).TotalSeconds
+                }
+                Start-Sleep -Milliseconds 1200
+            }
+            return 0L
+        }
+        $timingEnvironment = $envMap.Clone()
+        $timingEnvironment.HOBL_TIMING_STOP = $timingStop
+        $timing = Invoke-HoblProcess -Argv @($pwsh, '-NoProfile', '-Command',
+            'while (-not (Test-Path -LiteralPath $env:HOBL_TIMING_STOP)) { Start-Sleep -Milliseconds 20 }') `
+            -Log (Join-Path $owned 'timing.log') -WorkingDirectory $owned -Environment $timingEnvironment `
+            -Deadline ([datetime]::UtcNow.AddSeconds(25)) -BudgetRoot $fixtureRoot -BudgetBytes 10MB
+        Assert-True ($timing.processId -eq $script:timingKernel.pid) 'Timing witness joined the wrong child.'
+        Assert-True ([Math]::Abs($timing.processWallSeconds - $script:timingKernel.seconds) -lt 0.001) 'Score includes storage-observation delay.'
+        Assert-True ($timing.wallSeconds - $timing.processWallSeconds -ge 1) 'Fixture did not distinguish supervisor from process time.'
+    }
+    finally { Set-Item Function:Get-HoblBytes -Value $originalStorageGetter }
     Assert-Rejected { Invoke-HoblProcess -Argv @($pwsh, '-NoProfile', '-Command', 'exit 7') -Log (Join-Path $owned 'failure.log') @common } 'Nonzero exit accepted.'
     $failure = Get-Content (Join-Path $owned 'failure.log.command.json') -Raw | ConvertFrom-Json
     Assert-True ($failure.exitCode -eq 7) 'Original failed exit code lost.'
+    Assert-True ($failure.processWallSeconds -gt 0) 'Failed child lifetime was lost.'
     $accepted = Invoke-HoblProcess -Argv @($pwsh, '-NoProfile', '-Command', 'exit 7') -Log (Join-Path $owned 'accepted.log') -SuccessExitCodes @(0, 7) @common
     Assert-True ($accepted.exitCode -eq 7) 'Documented nonzero success exit was not retained.'
     Assert-Rejected { Invoke-HoblProcess -Argv @('missing-hobl-fixture-executable') -Log (Join-Path $owned 'missing.log') @common } 'Missing executable accepted.'
+    $missing = Get-Content (Join-Path $owned 'missing.log.command.json') -Raw | ConvertFrom-Json
+    Assert-True ($null -eq $missing.processWallSeconds) 'Failed launch invented a child lifetime.'
     $short = $common.Clone()
     $short.Deadline = [datetime]::UtcNow.AddSeconds(2)
     Assert-Rejected { Invoke-HoblProcess -Argv @($pwsh, '-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -Log (Join-Path $owned 'timeout.log') @short } 'Bounded process timeout ignored.'

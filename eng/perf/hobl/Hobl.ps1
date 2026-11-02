@@ -201,10 +201,13 @@ function Invoke-HoblProcess {
     $hasStarted = $false
     $childProcessId = $null
     $terminatedOwnTree = $false
+    $processStartedUtc = $null
+    $processExitedUtc = $null
     try {
         if (-not $process.Start()) { throw "Unable to start $($actual[0])" }
         $hasStarted = $true
         $childProcessId = $process.Id
+        $processStartedUtc = $process.StartTime.ToUniversalTime()
         $outTask = $process.StandardOutput.BaseStream.CopyToAsync($stdout)
         $errTask = $process.StandardError.BaseStream.CopyToAsync($stderr)
         $nextStorageCheck = [datetime]::UtcNow
@@ -232,6 +235,7 @@ function Invoke-HoblProcess {
         $clock.Stop()
     }
     finally {
+        if ($hasStarted -and $process.HasExited) { $processExitedUtc = $process.ExitTime.ToUniversalTime() }
         $stdout.Dispose()
         $stderr.Dispose()
         $process.Dispose()
@@ -244,6 +248,13 @@ function Invoke-HoblProcess {
         terminatedOwnTree = $terminatedOwnTree
         exitCode = $exitCode
         wallSeconds = $clock.Elapsed.TotalSeconds
+        # A storage scan can finish after the child exits. Keep supervisor time
+        # separate so that delayed observation cannot inflate the build lifetime.
+        processWallSeconds = if ($null -ne $processStartedUtc -and $null -ne $processExitedUtc) {
+            ($processExitedUtc - $processStartedUtc).TotalSeconds
+        } else { $null }
+        processStartedUtc = if ($null -ne $processStartedUtc) { $processStartedUtc.ToString('o') } else { $null }
+        processExitedUtc = if ($null -ne $processExitedUtc) { $processExitedUtc.ToString('o') } else { $null }
         stdout = $Log
         stderr = "$Log.stderr"
         failure = $failure
