@@ -1,0 +1,88 @@
+name: HOBL Aspire recipe adapter (owned fork only)
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: Original platform recipes or aligned solution companion
+        type: string
+        default: original
+      loops:
+        description: Four is a complete scenario; fewer is smoke only
+        type: string
+        default: '4'
+      diagnostic_binlogs:
+        description: Append /bl to timed commands (diagnostic, not recipe-exact timing)
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Original platform recipes or aligned solution companion
+        type: choice
+        options: [original, aligned]
+        default: original
+      loops:
+        description: Four is a complete scenario; fewer is smoke only
+        type: choice
+        options: ['4', '1']
+        default: '4'
+      diagnostic_binlogs:
+        description: Append /bl to timed commands (diagnostic, not recipe-exact timing)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  hobl:
+    if: github.repository == 'yeelam-gordon/aspire' && github.ref == 'refs/heads/perf/hobl-aspire'
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            runner: windows-11-vs2026-arm
+          - os: macos
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Python for original Mac prep
+        if: matrix.os == 'macos' && inputs.profile == 'original'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+          architecture: arm64
+      - name: Focused adapter fixtures
+        shell: pwsh
+        run: ./eng/perf/hobl/validate.ps1
+      - name: Execute pinned HOBL recipe
+        shell: pwsh
+        env:
+          HOBL_PROFILE: ${{ inputs.profile }}
+          HOBL_LOOPS: ${{ inputs.loops }}
+          HOBL_BINLOGS: ${{ inputs.diagnostic_binlogs }}
+        run: |
+          $diagnostics = $env:HOBL_BINLOGS -eq 'true'
+          ./eng/perf/hobl/run.ps1 -Profile $env:HOBL_PROFILE -Loops ([int]$env:HOBL_LOOPS) -DiagnosticBinlogs:$diagnostics -BudgetMinutes 50 -BudgetGiB 30
+      - name: Always preserve evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hobl-${{ matrix.os }}-${{ inputs.profile }}-${{ github.run_attempt }}
+          path: |
+            artifacts/hobl/**/logs/**
+            artifacts/hobl/**/provenance/**
+            artifacts/hobl/**/plan.json
+            artifacts/hobl/**/result.json
+            artifacts/hobl/**/hardware.json
+            artifacts/hobl/**/environment.json
+            artifacts/hobl/**/NuGet.Config
+            artifacts/hobl/**/metrics.csv
+          if-no-files-found: warn
+          retention-days: 14

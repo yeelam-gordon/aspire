@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "kind": "HOBL workload-recipe adapter, not full lab orchestration",
+  "hobl": {
+    "repository": "https://github.com/microsoft/HOBL",
+    "commit": "df120528374c0a5de5cb5a526175973d1ea2b53f",
+    "windowsPrep": "scenarios/windows/net_aspire/net_aspire_resources/net_aspire_prep.ps1",
+    "windowsRun": "scenarios/windows/net_aspire/net_aspire_resources/net_aspire_run.ps1",
+    "macosPrep": "scenarios/macos/mac_net_aspire/mac_net_aspire_resources/mac_net_aspire_prep.sh",
+    "macosRun": "scenarios/macos/mac_net_aspire/mac_net_aspire_resources/mac_net_aspire_run.sh"
+  },
+  "source": {
+    "repository": "https://github.com/microsoft/aspire.git",
+    "tag": "v9.4.2",
+    "commit": "4884590ffaa580e742f479b4daf77f9d36451f35"
+  },
+  "toolchain": {
+    "installerCommit": "e5cf1dd2d1540ed05ac84f8eb8c5cdec2807621e",
+    "sdks": ["8.0.427", "10.0.100-preview.5.25277.114"],
+    "runtimes": ["8.0.18", "9.0.6"],
+    "architectures": ["arm64", "x64"],
+    "frameworks": ["dotnet", "aspnetcore"],
+    "macosPython": "3.12.10"
+  },
+  "defaultLoops": 4,
+  "recipes": {
+    "solution": {
+      "prep": [
+        ["dotnet", "restore", "Aspire.slnx"],
+        ["dotnet", "build", "Aspire.slnx", "--no-incremental", "/p:UpdateConfigurationSchema=true"]
+      ],
+      "iteration": [
+        {"phase": "clean", "timed": false, "argv": ["dotnet", "clean", "Aspire.slnx"]},
+        {"phase": "restore", "timed": false, "argv": ["dotnet", "restore", "Aspire.slnx"]},
+        {"phase": "build", "timed": true, "argv": ["dotnet", "build", "Aspire.slnx", "--no-restore"]}
+      ]
+    },
+    "macosOriginal": {
+      "prep": [
+        ["./build.sh", "--restore", "--build", "/p:UpdateConfigurationSchema=true"]
+      ],
+      "iteration": [
+        {"phase": "clean", "timed": false, "argv": ["./build.sh", "--clean"]},
+        {"phase": "restore", "timed": false, "argv": ["./build.sh", "--restore"]},
+        {"phase": "build", "timed": true, "argv": ["./build.sh", "--build"]}
+      ]
+    }
+  },
+  "comparability": {
+    "original": "Platform-specific upstream recipes; raw Windows/Mac differences are NOT OS-only.",
+    "aligned": "Same Windows solution recipe AND schema prep on both OSes; hardware, tools and diagnostics still require attribution."
+  },
+  "adaptations": [
+    "Private pinned SDKs/runtimes and child-only environment instead of machine installation.",
+    "Owned-source Git operations use command-scoped core.longpaths=true; no global Git or Windows registry change.",
+    "A new owned workspace NuGet.Config replaces only inherited packageSourceMapping with v9.4.2's mappings. Audit, disabled-source, fallback, signer and signature-validation policy are retained; mapping replacement is a declared routing-policy adaptation.",
+    "Original Mac installs/verifies/shuts down its private SDK at source/.dotnet, the actual pinned tools.sh bootstrap root; solution profiles use run/dotnet.",
+    "Twenty seconds of the original total budget are reserved for bounded owned-SDK shutdown even after workload time expires.",
+    "Adapter scripts/helpers/manifest are snapshotted before setup. Actual compiler invocation count is unavailable; stdout command-line mentions are separately labeled.",
+    "No HOBL RPC/orchestrator, password helper, plugins, lab normalization or phase event provider.",
+    "Schema regeneration is untimed upstream prep on both original platforms; owned source diff is retained.",
+    "Default timed commands are recipe-exact. Opt-in diagnostic binlogs append /bl and are not directly comparable to uninstrumented runs.",
+    "macOS timed invocation uses upstream /usr/bin/time -p -o; Windows uses a monotonic wall stopwatch around the child command.",
+    "No machine/profile/Rosetta installation; existing Xcode, Node/npm and (original Mac) Python/Rosetta are prerequisites."
+  ]
+}

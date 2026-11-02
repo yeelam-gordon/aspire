@@ -1,0 +1,34 @@
+name: HOBL Aspire manual dispatcher (owned fork branch only)
+
+# This filename is already registered on the owned fork's default branch. A new
+# workflow_dispatch filename on a feature branch alone is not dispatchable.
+# The relative reusable workflow is resolved from this same selected branch.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Original platform recipes or aligned solution companion
+        type: choice
+        options: [original, aligned]
+        default: original
+      loops:
+        description: Four is a complete scenario; fewer is smoke only
+        type: choice
+        options: ['4', '1']
+        default: '4'
+      diagnostic_binlogs:
+        description: Append /bl to timed commands (diagnostic, not recipe-exact timing)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  hobl:
+    if: github.repository == 'yeelam-gordon/aspire' && github.ref == 'refs/heads/perf/hobl-aspire'
+    uses: ./.github/workflows/hobl-aspire.yml
+    with:
+      profile: ${{ inputs.profile }}
+      loops: ${{ inputs.loops }}
+      diagnostic_binlogs: ${{ inputs.diagnostic_binlogs }}
