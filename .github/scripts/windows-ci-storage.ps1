@@ -18,15 +18,16 @@ function Assert-StorageAdmission([object]$Inventory)
         throw 'Active antivirus and real-time protection are required in both arms.'
     }
     if ($Inventory.Variant -eq 'stock') { return }
-    if ($Inventory.DriveAssigned) { throw 'D: is already assigned; candidate is unqualified, not a no-op sample.' }
+    if ($Inventory.DriveAssigned -ne $false) { throw 'D: is assigned or unknown; candidate is unqualified, not a no-op sample.' }
     $eligible = @($Inventory.Disks | Where-Object {
         $_.BusType -eq 'NVMe' -and $_.PartitionStyle -eq 'RAW' -and
-        !$_.IsBoot -and !$_.IsSystem -and !$_.IsOffline -and !$_.IsReadOnly -and
+        $_.IsBoot -eq $false -and $_.IsSystem -eq $false -and
+        $_.IsOffline -eq $false -and $_.IsReadOnly -eq $false -and
         $_.NumberOfPartitions -eq 0 -and $_.Size -ge 50GB -and
         $_.Number -notin $Inventory.PartitionDiskNumbers
     })
     if ($eligible.Count -ne 1) { throw "Expected one unused raw NVMe disk; found$($eligible.Count)." }
-    if (!$Inventory.WorkspaceIsDirectory -or $Inventory.WorkspaceIsReparsePoint)
+    if ($Inventory.WorkspaceIsDirectory -ne $true -or $Inventory.WorkspaceIsReparsePoint -ne $false)
     {
         throw 'Workspace must be an ordinary directory.'
     }
