@@ -1,0 +1,72 @@
+name: Inspect Windows ARM build storage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      github.ref == 'refs/heads/perf/windows-arm-storage-inventory-20261110'
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 5
+    steps:
+      - name: Record storage and protection without changing either
+        shell: pwsh
+        env:
+          HOSTING_KIND: ${{ runner.environment }}
+          EXPECTED_ARCHITECTURE: ${{ runner.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:HOSTING_KIND -ne 'github-hosted' -or
+              $env:EXPECTED_ARCHITECTURE -ne 'ARM64' -or
+              [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64') {
+            throw 'Inventory requires the declared GitHub-hosted Windows ARM64 runner.'
+          }
+          $partitions = @(Get-Partition)
+          $disks = @(Get-Disk)
+          $eligible = @($disks | Where-Object {
+            $_.BusType -eq 'NVMe' -and $_.PartitionStyle -eq 'RAW' -and
+            -not $_.IsBoot -and -not $_.IsSystem -and
+            -not $_.IsOffline -and -not $_.IsReadOnly -and
+            $_.NumberOfPartitions -eq 0 -and $_.Size -ge 50GB -and
+            $_.Number -notin $partitions.DiskNumber
+          })
+          $protection = Get-MpComputerStatus
+          $preference = Get-MpPreference
+          $format = Get-Command Format-Volume -ErrorAction Stop
+          $record = [ordered]@{
+            source = $env:GITHUB_SHA
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            imageOS = $env:ImageOS
+            imageVersion = $env:ImageVersion
+            os = [Runtime.InteropServices.RuntimeInformation]::OSDescription
+            processArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+            workspace = $env:GITHUB_WORKSPACE
+            runnerTemp = $env:RUNNER_TEMP
+            disks = @($disks | Select-Object Number, BusType, PartitionStyle, IsBoot, IsSystem, IsOffline, IsReadOnly, NumberOfPartitions, Size)
+            partitions = @($partitions | Select-Object DiskNumber, PartitionNumber, DriveLetter, Size)
+            volumes = @(Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining)
+            eligibleUnusedNvmeCount = $eligible.Count
+            formatCommandSupportsDevDrive = $format.Parameters.ContainsKey('DevDrive')
+            realTimeProtectionEnabled = $protection.RealTimeProtectionEnabled
+            antivirusEnabled = $protection.AntivirusEnabled
+            defenderPerformanceMode = $preference.PerformanceModeStatus
+            volumeTrustQualified = $false
+            diskMutationPerformed = $false
+            applicability = 'Inventory only; no automatic formatting or universal runner-support claim.'
+          }
+          $record | ConvertTo-Json -Depth 7
+          $record | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath storage-inventory.json -Encoding utf8
+
+      - name: Retain read-only inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-arm-storage-inventory
+          path: storage-inventory.json
+          if-no-files-found: error
+          retention-days: 7
