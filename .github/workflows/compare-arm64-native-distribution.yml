@@ -1,0 +1,29 @@
+name: Compare Windows ARM native-build storage
+
+on:
+  workflow_dispatch:
+    inputs:
+      storage:
+        description: Storage arm; dispatch stock, refs, refs, stock sequentially
+        required: true
+        type: choice
+        options: [stock, refs]
+        default: stock
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-arm-storage-comparison-20261110
+  cancel-in-progress: false
+
+jobs:
+  native:
+    if: >-
+      github.repository == 'yeelam-gordon/aspire' &&
+      github.ref == 'refs/heads/perf/windows-arm-storage-compare-20261110'
+    uses: ./.github/workflows/build-cli-native-archives.yml
+    with:
+      configuration: Release
+      targets: '[{"os":"windows-latest","runner":"windows-11-vs2026-arm","rids":"win-arm64"}]'
+      storageExperiment: ${{ inputs.storage }}

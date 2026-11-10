@@ -10,6 +10,10 @@ on:
         required: false
         type: string
         default: Release
+      storageExperiment:
+        required: false
+        type: string
+        default: stock
       targets:
         description: >
           JSON array of target objects to build. Each object must have 'os', 'runner', and 'rids' keys.
@@ -31,7 +35,12 @@ jobs:
 
   build_cli_archives:
     name: Build CLI (${{ matrix.targets.rids }})
-    if: ${{ github.repository == 'microsoft/aspire' }}
+    if: >-
+      github.repository == 'microsoft/aspire' ||
+      (github.repository == 'yeelam-gordon/aspire' &&
+       github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/perf/windows-arm-storage-compare-20261110')
+    timeout-minutes: 45
     runs-on: ${{ matrix.targets.runner }}
     strategy:
       matrix:
@@ -65,6 +74,18 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare comparison storage before native build
+        if: github.repository == 'yeelam-gordon/aspire' && github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          STORAGE_VARIANT: ${{ inputs.storageExperiment }}
+          STORAGE_HOSTING: ${{ runner.environment }}
+          STORAGE_RUNNER_ARCH: ${{ runner.arch }}
+        run: >
+          ./.github/scripts/windows-ci-storage.ps1
+          -Variant $env:STORAGE_VARIANT
+          -EvidencePath "$env:GITHUB_WORKSPACE/artifacts/log/Release/storage-comparison.json"
 
       # Node.js is required because PackDotnetTool now depends on PackNpmPackage,
       # which shells out to `npm pack` to produce the @microsoft/aspire-cli npm
