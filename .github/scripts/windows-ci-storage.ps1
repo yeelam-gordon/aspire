@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('stock', 'refs')][string]$Variant,
+    [Parameter(Mandatory)][ValidateSet('stock', 'refs', 'devdrive')][string]$Variant,
     [Parameter(Mandatory)][string]$EvidencePath,
     [switch]$LoadFunctionsOnly
 )
@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 function Assert-StorageAdmission([object]$Inventory)
 {
+    if ($Inventory.Variant -notin @('stock', 'refs', 'devdrive')) { throw 'Unknown storage treatment.' }
     if ($Inventory.Hosting -ne 'github-hosted' -or $Inventory.RunnerArchitecture -ne 'ARM64' -or
         $Inventory.OsArchitecture -ne 'Arm64' -or $Inventory.ProcessArchitecture -ne 'Arm64')
     {
@@ -18,6 +19,10 @@ function Assert-StorageAdmission([object]$Inventory)
         throw 'Active antivirus and real-time protection are required in both arms.'
     }
     if ($Inventory.Variant -eq 'stock') { return }
+    if ($Inventory.Variant -eq 'devdrive' -and $Inventory.DevDriveSupported -ne $true)
+    {
+        throw 'Format-Volume does not support Dev Drive on this runner; do not initialize storage.'
+    }
     if ($Inventory.DriveAssigned -ne $false) { throw 'D: is assigned or unknown; candidate is unqualified, not a no-op sample.' }
     $eligible = @($Inventory.Disks | Where-Object {
         $_.BusType -eq 'NVMe' -and $_.PartitionStyle -eq 'RAW' -and
@@ -61,6 +66,8 @@ if ($LoadFunctionsOnly) { return }
 
 $partitions = @(Get-Partition)
 $protection = Get-MpComputerStatus
+$preference = Get-MpPreference
+$formatCommand = Get-Command Format-Volume -ErrorAction Stop
 $workspace = Get-Item -LiteralPath $env:GITHUB_WORKSPACE -Force
 $inventory = [pscustomobject]@{
     Variant = $Variant
@@ -70,6 +77,7 @@ $inventory = [pscustomobject]@{
     ProcessArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
     RealTimeProtectionEnabled = $protection.RealTimeProtectionEnabled
     AntivirusEnabled = $protection.AntivirusEnabled
+    DevDriveSupported = $formatCommand.Parameters.ContainsKey('DevDrive')
     DriveAssigned = [bool](@($partitions | Where-Object DriveLetter -EQ 'D').Count -or
         @(Get-Volume | Where-Object DriveLetter -EQ 'D').Count -or
         @(Get-PSDrive -PSProvider FileSystem | Where-Object Name -EQ 'D').Count)
@@ -91,11 +99,13 @@ $record = [ordered]@{
     workspacePhysical = $workspace.FullName
     filesystem = (Get-Volume -FilePath $workspace.FullName).FileSystem
     diskInitialized = $false
-    protectionPolicyChanged = $false
+    protectionPolicyOverridden = $false
+    defenderPerformanceModeStatus = $preference.PerformanceModeStatus
+    effectiveVolumeProtectionMayDiffer = ($Variant -eq 'devdrive')
     devDriveCreated = $false
     workspaceBackup = $null
 }
-if ($Variant -eq 'refs')
+if ($Variant -ne 'stock')
 {
     # Revalidate immediately before the only destructive operation. Never clear,
     # resize or format a previously partitioned disk, including on self-hosted CI.
@@ -104,13 +114,30 @@ if ($Variant -eq 'refs')
     $disk = Assert-StorageAdmission $inventory
     $partition = Initialize-Disk -InputObject $disk -PartitionStyle GPT -PassThru |
         New-Partition -UseMaximumSize -DriveLetter D
-    # Plain ReFS deliberately excludes -DevDrive: trusted Dev Drive defaults can
-    # defer Defender scans. This arm measures storage placement without that change.
+    # Dev Drive uses ReFS and can change default per-volume scan scheduling.
+    # Keep plain ReFS as a separate control; never force trust, remove filters,
+    # disable protection or add exclusions to manufacture a performance result.
     # https://learn.microsoft.com/defender-endpoint/microsoft-defender-endpoint-antivirus-performance-mode
-    $volume = $partition | Format-Volume -FileSystem ReFS -NewFileSystemLabel 'AspireBuild' -Confirm:$false
+    $volume = if ($Variant -eq 'devdrive')
+    {
+        $partition | Format-Volume -DevDrive -FileSystem ReFS -NewFileSystemLabel 'AspireBuild' -Confirm:$false
+    }
+    else
+    {
+        $partition | Format-Volume -FileSystem ReFS -NewFileSystemLabel 'AspireBuild' -Confirm:$false
+    }
     if ($volume.FileSystem -ne 'ReFS' -or $volume.DriveLetter -ne 'D')
     {
-        throw 'New storage volume is not the expected plain ReFS D: volume.'
+        throw 'New storage volume is not the expected ReFS D: volume.'
+    }
+    if ($Variant -eq 'devdrive')
+    {
+        $query = @(& fsutil devdrv query D: 2>&1)
+        $queryExit = $LASTEXITCODE
+        if ($queryExit -ne 0) { throw "New Dev Drive could not be queried:exit$queryExit; $($query -join ' ')" }
+        $record.devDriveCreated = $true
+        $record.devDriveQuery = @($query | ForEach-Object { "$_" })
+        $record.devDriveQueryExitCode = $queryExit
     }
     $migration = @(Move-CiWorkspace $workspace 'D:\workspace' $env:RUNNER_TEMP)[-1]
     $null = New-Item -ItemType Directory -Path 'D:\build-temp'
@@ -132,8 +159,8 @@ $record.realTimeProtectionAfter = $after.RealTimeProtectionEnabled
 $record.antivirusAfter = $after.AntivirusEnabled
 $record.preparationSeconds = ([DateTime]::UtcNow - $began).TotalSeconds
 $record.packageCache = $env:NUGET_PACKAGES
-$record.tempForFollowingSteps = if ($Variant -eq 'refs') { 'D:\build-temp' } else { $env:TEMP }
+$record.tempForFollowingSteps = if ($Variant -ne 'stock') { 'D:\build-temp' } else { $env:TEMP }
 $parent = Split-Path -Parent $EvidencePath
 $null = [IO.Directory]::CreateDirectory($parent)
 $record | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
-Write-Output "Storage comparison prepared:$Variant, filesystem:$($record.filesystem); protection remains enabled."
+Write-Output "Storage prepared:$Variant, filesystem:$($record.filesystem); antivirus is enabled, volume scan behavior is recorded separately."

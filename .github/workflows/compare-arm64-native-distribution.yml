@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       storage:
-        description: Storage arm; dispatch stock, refs, refs, stock sequentially
+        description: Storage arm; compare stock, devdrive, devdrive, stock sequentially
         required: true
         type: choice
-        options: [stock, refs]
+        options: [stock, refs, devdrive]
         default: stock
 
 permissions:
