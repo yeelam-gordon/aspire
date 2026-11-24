@@ -85,7 +85,7 @@ jobs:
         run: >
           ./.github/scripts/windows-ci-storage.ps1
           -Variant $env:STORAGE_VARIANT
-          -EvidencePath "$env:GITHUB_WORKSPACE/artifacts/log/Release/storage-comparison.json"
+          -EvidencePath "$env:RUNNER_TEMP/storage-comparison.json"
 
       # Node.js is required because PackDotnetTool now depends on PackNpmPackage,
       # which shells out to `npm pack` to produce the @microsoft/aspire-cli npm
@@ -299,6 +299,26 @@ jobs:
             -PackagesDir "artifacts/packages/$env:BUILD_CONFIGURATION" `
             -Rid $rid `
             -ArchivePath $archive[0].FullName
+
+      - name: Verify comparison storage use after native build
+        if: github.repository == 'yeelam-gordon/aspire' && github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          STORAGE_VARIANT: ${{ inputs.storageExperiment }}
+        run: >
+          ./.github/scripts/windows-ci-storage.ps1
+          -Variant $env:STORAGE_VARIANT
+          -EvidencePath "$env:RUNNER_TEMP/storage-comparison.json"
+          -VerifyUseOnly
+
+      - name: Upload comparison storage evidence
+        if: always() && github.repository == 'yeelam-gordon/aspire' && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: storage-comparison-${{ matrix.targets.rids }}
+          path: ${{ runner.temp }}/storage-comparison.json
+          if-no-files-found: error
+          retention-days: 15
 
       # Upload DCP, Dashboard, and CLI tool packages so test/polyglot jobs can download them
       - name: Upload RID-specific packages

@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory)][ValidateSet('stock', 'refs', 'devdrive')][string]$Variant,
     [Parameter(Mandatory)][string]$EvidencePath,
-    [switch]$LoadFunctionsOnly
+    [switch]$LoadFunctionsOnly,
+    [switch]$VerifyUseOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,8 +63,50 @@ function Move-CiWorkspace([IO.DirectoryInfo]$Workspace, [string]$Destination, [s
     }
     return [pscustomobject]@{ Backup = $backup; CopyExitCode = $copyExit }
 }
+function Get-CiStorageUseEvidence([string]$Treatment, [string]$WorkspacePath, [string]$PackageCache, [string]$TempPath)
+{
+    $workspace = Get-Item -LiteralPath $WorkspacePath -Force
+    $physicalWorkspace = if ($workspace.LinkType) { $workspace.ResolveLinkTarget($true).FullName } else { $workspace.FullName }
+    $cache = [IO.Path]::GetFullPath($PackageCache)
+    $prefix = "$($workspace.FullName.TrimEnd('\'))\"
+    if (!$cache.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw 'NuGet package cache is outside the relocated workspace.'
+    }
+    $physicalCache = Join-Path $physicalWorkspace $cache.Substring($prefix.Length)
+    $package = Get-ChildItem -LiteralPath $physicalCache -Filter '*.nupkg.metadata' -File -Recurse |
+        Select-Object -First 1
+    if (!$package) { throw 'NuGet cache has no restored package metadata; reject an unused cache measurement.' }
+    $volume = Get-Volume -FilePath $physicalWorkspace
+    $null = Get-Item -LiteralPath $TempPath -Force
+    if ($Treatment -ne 'stock' -and
+        ($physicalWorkspace -ne 'D:\workspace' -or $volume.FileSystem -ne 'ReFS' -or
+         $volume.DriveLetter -ne 'D' -or $TempPath -ne 'D:\build-temp'))
+    {
+        throw 'Observed build paths do not use the prepared ReFS D: volume.'
+    }
+    return [ordered]@{
+        workspacePhysical = $physicalWorkspace; packageCachePhysical = $physicalCache
+        restoredPackageExample = $package.FullName; temp = $TempPath
+        filesystem = $volume.FileSystem; driveLetter = "$($volume.DriveLetter)"
+        checkedUtc = [DateTime]::UtcNow.ToString('o')
+    }
+}
 if ($LoadFunctionsOnly) { return }
 
+if ($VerifyUseOnly)
+{
+    $record = Get-Content -Raw -LiteralPath $EvidencePath | ConvertFrom-Json -AsHashtable
+    if ($record.variant -ne $Variant -or $record.source -ne $env:GITHUB_SHA -or $record.status -ne 'prepared')
+    {
+        throw 'Storage preparation receipt does not match this build.'
+    }
+    $record.observedUse = Get-CiStorageUseEvidence $Variant $env:GITHUB_WORKSPACE $env:NUGET_PACKAGES $env:TEMP
+    $record.status = 'build-use-verified'
+    $record | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
+    return
+}
+$began = [DateTime]::UtcNow
 $partitions = @(Get-Partition)
 $protection = Get-MpComputerStatus
 $preference = Get-MpPreference
@@ -86,10 +129,9 @@ $inventory = [pscustomobject]@{
     WorkspaceIsDirectory = $workspace.PSIsContainer
     WorkspaceIsReparsePoint = [bool]($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint)
 }
-$disk = Assert-StorageAdmission $inventory
-$began = [DateTime]::UtcNow
 $record = [ordered]@{
     variant = $Variant; source = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID
+    status = 'not-admitted'
     runAttempt = $env:GITHUB_RUN_ATTEMPT; imageOS = $env:ImageOS; imageVersion = $env:ImageVersion
     osArchitecture = $inventory.OsArchitecture; processArchitecture = $inventory.ProcessArchitecture
     logicalProcessors = [Environment]::ProcessorCount
@@ -104,7 +146,20 @@ $record = [ordered]@{
     effectiveVolumeProtectionMayDiffer = ($Variant -eq 'devdrive')
     devDriveCreated = $false
     workspaceBackup = $null
+    inventoryBefore = @{
+        disks = @($inventory.Disks | Select-Object Number, BusType, PartitionStyle, Size,
+            IsBoot, IsSystem, IsOffline, IsReadOnly, NumberOfPartitions)
+        partitions = @($partitions | Select-Object DiskNumber, PartitionNumber, DriveLetter, Size)
+        driveAssigned = $inventory.DriveAssigned
+        devDriveSupported = $inventory.DevDriveSupported
+    }
 }
+# Keep the receipt outside artifacts/log: build cleanup must not erase the only
+# disk/protection evidence, including when admission or a later build fails.
+$parent = Split-Path -Parent $EvidencePath
+$null = [IO.Directory]::CreateDirectory($parent)
+$record | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
+$disk = Assert-StorageAdmission $inventory
 if ($Variant -ne 'stock')
 {
     # Revalidate immediately before the only destructive operation. Never clear,
@@ -160,7 +215,6 @@ $record.antivirusAfter = $after.AntivirusEnabled
 $record.preparationSeconds = ([DateTime]::UtcNow - $began).TotalSeconds
 $record.packageCache = $env:NUGET_PACKAGES
 $record.tempForFollowingSteps = if ($Variant -ne 'stock') { 'D:\build-temp' } else { $env:TEMP }
-$parent = Split-Path -Parent $EvidencePath
-$null = [IO.Directory]::CreateDirectory($parent)
+$record.status = 'prepared'
 $record | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
 Write-Output "Storage prepared:$Variant, filesystem:$($record.filesystem); antivirus is enabled, volume scan behavior is recorded separately."
